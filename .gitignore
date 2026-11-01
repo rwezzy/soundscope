@@ -1,0 +1,5 @@
+# Room recordings can capture private conversation; keep them out of the public repo.
+recordings/
+__pycache__/
+# API keys
+.env

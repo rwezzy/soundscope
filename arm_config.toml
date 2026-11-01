@@ -1,0 +1,75 @@
+# SoundScope arm settings: every number you may need to measure or tune.
+# Units: millimeters and degrees. ARM_SETUP.md explains how to measure each one.
+#
+# Arm base frame (the same one UFACTORY Studio and Viam's "world" use):
+#   origin = center of the arm's base, at table level
+#   +X = the direction the arm reaches when J1 = 0
+#   +Y = to the left of +X,  +Z = up
+# "From +X toward +Y" angles are counterclockwise seen from above.
+
+[safety]
+# Master switch. The arm only moves when this is true AND you run with --live AND type MOVE.
+live = false
+speed_deg_s = 15               # joint speed, sent to the arm before any move (code refuses > 30)
+accel_deg_s2 = 60              # joint acceleration (code refuses > 200)
+collision_sensitivity = 4      # Viam arm attribute: 0 = off .. 5 = stops with the least force
+max_step_deg = 30              # biggest single turn; longer turns happen in steps (cap 45)
+deadband_deg = 6               # ignore aim changes smaller than this
+min_interval_s = 1.5           # minimum time between new turns
+yaw_window_deg = [-90, 90]     # J1 may only turn this far either side of where it started (cap 170)
+pitch_window_deg = [-15, 15]   # same for J5, used only when aim.use_pitch = true (cap 30)
+min_confidence_z = 12          # only turn for "solid" sound fixes (z, as mic_test prints it)
+min_snr_db = -20               # faint is fine as long as z is high
+mute_after_move_s = 0.8        # ignore sounds right after a move (motor noise)
+
+[aim]
+assumed_distance_mm = 1000     # used until the depth camera supplies the real distance
+use_pitch = false              # also tilt with J5; the flat mic array's up/down is weak, so off
+pitch_sign = 1                 # set to -1 if J5 tilts the camera the wrong way
+
+[array]                        # the reSpeaker board, lying flat
+position_mm = [200, -250, 0]   # board center in the arm base frame [forward, left, up]
+front_yaw_deg = 0              # the way the board's FRONT edge faces, from +X toward +Y
+
+[look]
+# Dry-run stand-in for the arm's starting pose. Live and `check` runs read the real pose.
+start_joints_deg = [0, 0, 90, 0, 90, 0]   # only J1 and J5 matter for a dry run
+# What should face the sound, measured with J1 = 0: the camera when it is on the arm,
+# the gripper when the camera sits beside the base.
+reach_mm = 250                 # horizontal distance from the J1 axis
+lateral_mm = 0                 # sideways offset from the arm's center line (+ = left)
+heading_deg = 0                # how far it looks left (+) of straight out along the arm
+height_mm = 250                # above the table
+pitch_deg = 0                  # its tilt at the start (+ = up)
+
+[reach]                        # the "within grasp" check; the Lite 6 reaches 440 mm
+max_radius_mm = 380
+min_radius_mm = 150
+min_height_mm = 20
+max_height_mm = 350
+
+[camera]
+mount = "base"                 # "base" = beside the arm (now); "arm" = on the 3D-printed mount
+hfov_deg = 86                  # Gemini 2 color camera horizontal field of view (datasheet)
+min_depth_mm = 200             # the Gemini 2 can't measure closer than this
+
+[camera.base]                  # camera sitting beside the arm base
+position_mm = [150, 250, 60]   # lens center in the arm base frame
+yaw_deg = 0                    # the way the lens faces, from +X toward +Y
+pitch_deg = 0                  # + = tilted up
+
+[camera.arm]                   # camera on the end effector
+# Lens position in the flange frame: +Z = out of the flange face (the way the gripper points).
+# Read these off your mount's CAD. Negative Z = behind the flange face.
+offset_mm = [0, 70, -130]
+lens_direction = [0, 0, 1]     # the way the lens points, in the flange frame
+roll_deg = 0                   # spin about the lens axis; set it so Viam's 3D scene looks right
+gripper_tip_mm = 75            # fingertips' distance in front of the flange face. Measure yours.
+# The fingertips must sit at least min_depth_mm in front of the lens so a grasped object
+# is still measurable; the programs warn if they don't.
+
+[viam]
+arm_name = "arm"
+camera_name = "camera"
+# The address and API key come from VIAM_ADDRESS, VIAM_API_KEY and VIAM_API_KEY_ID in
+# meta-soundscope/.env, never from this file.
