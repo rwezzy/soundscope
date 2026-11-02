@@ -46,9 +46,9 @@ def stamp():
 class Listener(threading.Thread):
     """Mic thread: finds sounds with the direction tracker and keeps recent audio for Meta."""
 
-    def __init__(self, post, keep_s=8.0):
+    def __init__(self, post, keep_s=8.0, updates=False):
         super().__init__(daemon=True)
-        self.dev, self.chans, self.post = find_array(), raw_channels(), post
+        self.dev, self.chans, self.post, self.updates = find_array(), raw_channels(), post, updates
         self.buf = np.zeros((int(keep_s * FS), CHANNELS), np.float32)
         self.pos = 0
         self.mute_until = 0.0
@@ -74,10 +74,14 @@ class Listener(threading.Thread):
                         frame = np.concatenate([frame[HOP:], pending[:HOP]])
                         pending = pending[HOP:]
                         out = tracker.push(loc.stft(frame)[0])
-                        if out and out[0] == 'end' and out[1] and time.monotonic() >= self.mute_until:
+                        if not (out and out[1]) or time.monotonic() < self.mute_until:
+                            continue
+                        if out[0] == 'end':
                             clip = self._recent(min(out[1]['seconds'] + 0.9, 6.0))  # the sound + its quiet tail
                             self.post({'kind': 'sound', 'fix': out[1],
                                        'wav': wav_bytes(clip[:, self.chans].mean(axis=1))})
+                        elif self.updates:  # running estimate while the sound is still playing
+                            self.post({'kind': 'update', 'fix': out[1]})
         except Exception as exc:  # report mic trouble in the main thread
             self.error = exc
             self.ready.set()
@@ -269,7 +273,8 @@ class Follower:
 
     async def on_sound(self, ev):
         fix = ev['fix']
-        line = f"{stamp()} heard {side(bearing(fix['azimuth']))} (z {fix['z']:.0f}, SNR {fix['snr_db']:+.0f} dB)"
+        line = (f"{stamp()} heard {side(aim.base_bearing(fix['direction'], self.cfg)[0])} "
+                f"(z {fix['z']:.0f}, SNR {fix['snr_db']:+.0f} dB)")
         if not self.following:
             print(line + ' - not following; press Enter and say "follow"')
             return

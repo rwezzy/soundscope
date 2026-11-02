@@ -13,6 +13,10 @@ import numpy as np
 import aim
 
 CFG = aim.load_config()
+# Fixed geometry, so the tests don't depend on what you measured into arm_config.toml.
+CFG['array'].update(mount='flat', position_mm=[200, -250, 0], front_yaw_deg=0)
+CFG['camera'].update(mount='base')
+CFG['camera']['base'].update(position_mm=[150, 250, 60], yaw_deg=0, pitch_deg=0)
 
 
 def cfg_with(**sections):

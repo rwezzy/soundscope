@@ -42,6 +42,7 @@ def snr_db(power_ratio):
 class Localizer:
     def __init__(self, mic_xyz=MIC_XYZ, f_lo=200.0, f_hi=7600.0, echo_decay_s=1.0):
         mic_xyz = np.asarray(mic_xyz, float)
+        self.mic_xyz = mic_xyz
         # Power that fades at least as fast as a room echo (60 dB per echo_decay_s) counts as echo.
         self.echo_decay = 10 ** (-6 * HOP / FS / echo_decay_s)
         n = len(mic_xyz)
@@ -93,16 +94,30 @@ class Localizer:
         G /= np.abs(G) + 1e-30
         return (G * w[:, None]).sum(axis=0), w.sum(axis=0), (w ** 2).sum(axis=0)
 
+    def gcc(self, C, W):
+        """Cross-correlation of every mic pair at 1/UPSAMPLE-sample lags; each pair peaks at <= 1."""
+        m = N_FFT * UPSAMPLE
+        spec = np.zeros((len(self.pairs), m // 2 + 1), complex)
+        spec[:, :C.shape[1]] = C
+        return np.fft.irfft(spec, n=m, axis=1) * (m / 2) / W.sum()
+
+    def srp_points(self, gcc, points):
+        """How well a sound from each 3D point (N, 3; meters, array frame) fits the evidence.
+
+        Uses the true distance from each point to each mic, so it stays right for nearby points;
+        on the same scale as the direction map in peak().
+        """
+        dist = np.linalg.norm(points[:, None, :] - self.mic_xyz[None], axis=2)              # (N, mics)
+        lags = (dist[:, self.pairs[:, 0]] - dist[:, self.pairs[:, 1]]) / SPEED_OF_SOUND     # (N, pairs)
+        idx = np.round(lags * FS * UPSAMPLE).astype(int) % gcc.shape[1]
+        return gcc[np.arange(len(self.pairs)), idx].mean(axis=1)
+
     def peak(self, C, W, W2):
         """Best direction from summed evidence, or None if nothing rose above the floor."""
         total = W.sum()
         if total <= 0:
             return None
-        m = N_FFT * UPSAMPLE
-        spec = np.zeros((len(self.pairs), m // 2 + 1), complex)
-        spec[:, :C.shape[1]] = C
-        gcc = np.fft.irfft(spec, n=m, axis=1) * (m / 2) / total  # each pair peaks at <= 1
-        srp = np.take_along_axis(gcc, self.lag_idx, axis=1).mean(axis=0)
+        srp = np.take_along_axis(self.gcc(C, W), self.lag_idx, axis=1).mean(axis=0)
         k = int(np.argmax(srp))
         # How far the map would wander if every phase were random; z says how sure the peak is.
         sigma = np.sqrt(W2.sum() / 2 / len(self.pairs)) / total
@@ -160,6 +175,7 @@ class Tracker:
         if r:
             r['seconds'] = self.frames * HOP / FS
             r['snr_db'] = snr_db(np.mean(self.ratios))
+            r['evidence'] = tuple(a.copy() for a in acc)  # lets callers score any 3D point (srp_points)
         return r
 
     def push(self, X):

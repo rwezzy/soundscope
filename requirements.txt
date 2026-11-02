@@ -1,4 +1,6 @@
 numpy
 sounddevice
+opencv-python
+pyorbbecsdk2==2.1.3   # Orbbec Gemini 2 camera
 matplotlib   # spectrogram pictures for Muse Spark
 viam-sdk     # only for --live and check (the real arm)

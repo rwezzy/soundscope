@@ -27,9 +27,15 @@ assumed_distance_mm = 1000     # used until the depth camera supplies the real d
 use_pitch = false              # also tilt with J5; the flat mic array's up/down is weak, so off
 pitch_sign = 1                 # set to -1 if J5 tilts the camera the wrong way
 
-[array]                        # the reSpeaker board, lying flat
-position_mm = [200, -250, 0]   # board center in the arm base frame [forward, left, up]
-front_yaw_deg = 0              # the way the board's FRONT edge faces, from +X toward +Y
+[array]                        # the reSpeaker board
+# "flat"   = lying down, LED side up; front_yaw_deg = where the cable edge points.
+# "facing" = standing up, LED side facing front_yaw_deg (usually the camera's way), cable edge up.
+#            Best for the camera view: it hears up/down too, so a sound maps to one spot.
+mount = "facing"
+position_mm = [0, 0, -80]      # board center in the base frame [forward, left, up]
+front_yaw_deg = 0              # from +X toward +Y; `python scope.py` press c to calibrate it
+# Right now (camera demo, no arm) the CAMERA is the origin: board standing 8 cm below the lens.
+# When the arm comes back, measure the board and camera from the arm base instead.
 
 [look]
 # Dry-run stand-in for the arm's starting pose. Live and `check` runs read the real pose.
@@ -54,9 +60,9 @@ hfov_deg = 86                  # Gemini 2 color camera horizontal field of view 
 min_depth_mm = 200             # the Gemini 2 can't measure closer than this
 
 [camera.base]                  # camera sitting beside the arm base
-position_mm = [150, 250, 60]   # lens center in the arm base frame
+position_mm = [0, 0, 0]        # lens center in the base frame (the origin, for the camera demo)
 yaw_deg = 0                    # the way the lens faces, from +X toward +Y
-pitch_deg = 0                  # + = tilted up
+pitch_deg = 0                  # + = tilted up, - = tilted down toward the table
 
 [camera.arm]                   # camera on the end effector
 # Lens position in the flange frame: +Z = out of the flange face (the way the gripper points).

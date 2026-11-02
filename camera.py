@@ -1,0 +1,91 @@
+"""Orbbec Gemini 2: color frames plus depth aligned to them, through pyorbbecsdk2.
+
+Same SDK calls as Meta_Hack's tools/gemini_capture.py. Plug the camera straight into a USB 3
+port and close Orbbec Viewer first.
+"""
+import cv2
+import numpy as np
+
+
+class Gemini:
+    def __init__(self, size=(1280, 720)):
+        import pyorbbecsdk as sdk
+        self.sdk = sdk
+        sdk.Context.set_logger_level(sdk.OBLogLevel.NONE)
+        try:
+            self.pipeline = sdk.Pipeline()
+        except Exception as exc:
+            raise SystemExit(f'No Gemini 2 found ({exc}). Plug it into a USB 3 port and close Orbbec Viewer.')
+        colors = self.pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
+        color = None
+        for width, height in (size, (640, 480), (0, 0)):
+            for fmt in (sdk.OBFormat.RGB, sdk.OBFormat.MJPG, sdk.OBFormat.BGR, sdk.OBFormat.YUYV):
+                try:
+                    color = colors.get_video_stream_profile(width, height, fmt, 0)
+                    break
+                except Exception:
+                    continue
+            if color:
+                break
+        if color is None:
+            raise SystemExit('The Gemini 2 offers no usable color stream.')
+        depth = self.pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR) \
+            .get_video_stream_profile(0, 0, sdk.OBFormat.Y16, 0)
+        config = sdk.Config()
+        config.enable_stream(color)
+        config.enable_stream(depth)
+        config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
+        self.align = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM)
+        self.intrinsics = None
+        self.pipeline.start(config)
+
+    def read(self, timeout_ms=1000):
+        """(BGR image, depth in mm aligned to it as float32 with 0 = unknown, intrinsics) or None."""
+        frames = self.pipeline.wait_for_frames(timeout_ms)
+        if frames is None or frames.get_color_frame() is None or frames.get_depth_frame() is None:
+            return None
+        aligned = self.align.process(frames)
+        depth = aligned.as_frame_set().get_depth_frame() if aligned is not None else None
+        if depth is None:
+            return None
+        color = frames.get_color_frame()
+        image = self._bgr(color)
+        mm = np.frombuffer(depth.get_data(), np.uint16).reshape(depth.get_height(), depth.get_width())
+        mm = mm.astype(np.float32) * depth.get_depth_scale()
+        if image is None or mm.shape != image.shape[:2]:
+            return None
+        if self.intrinsics is None:
+            k = color.get_stream_profile().as_video_stream_profile().get_intrinsic()
+            self.intrinsics = {'fx': k.fx, 'fy': k.fy, 'cx': k.cx, 'cy': k.cy}
+        return image, mm, self.intrinsics
+
+    def _bgr(self, frame):
+        sdk, fmt = self.sdk, frame.get_format()
+        data = np.frombuffer(frame.get_data(), np.uint8)
+        h, w = frame.get_height(), frame.get_width()
+        if fmt == sdk.OBFormat.RGB:
+            return cv2.cvtColor(data.reshape(h, w, 3), cv2.COLOR_RGB2BGR)
+        if fmt == sdk.OBFormat.BGR:
+            return data.reshape(h, w, 3).copy()
+        if fmt == sdk.OBFormat.MJPG:
+            return cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if fmt == sdk.OBFormat.YUYV:
+            return cv2.cvtColor(data.reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUY2)
+        return None
+
+    def close(self):
+        self.pipeline.stop()
+
+
+def backproject(u, v, depth_m, k):
+    """Pixel(s) + depth (m) -> camera-frame points (m): x right, y down, z out of the lens."""
+    u, v, z = np.broadcast_arrays(np.asarray(u, float), np.asarray(v, float), np.asarray(depth_m, float))
+    return np.stack([(u - k['cx']) / k['fx'] * z, (v - k['cy']) / k['fy'] * z, z], axis=-1)
+
+
+def project(points, k):
+    """Camera-frame points (m) -> pixel (u, v); None where behind the camera."""
+    p = np.asarray(points, float)
+    if p[..., 2] <= 0:
+        return None
+    return k['fx'] * p[..., 0] / p[..., 2] + k['cx'], k['fy'] * p[..., 1] / p[..., 2] + k['cy']

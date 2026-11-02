@@ -60,14 +60,37 @@ def rot_z(deg):
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
+def array_axes(cfg):
+    """Rotation from the array's own frame (x = cable edge, z = LED side) to the base frame.
+
+    mount "flat": lying down, LEDs up, cable edge toward front_yaw_deg.
+    mount "facing": standing up, LEDs facing front_yaw_deg, cable edge pointing up.
+    """
+    a = cfg['array']
+    yaw = math.radians(a['front_yaw_deg'])
+    ahead, up = np.array([math.cos(yaw), math.sin(yaw), 0.0]), np.array([0.0, 0.0, 1.0])
+    x, z = (up, ahead) if a.get('mount', 'flat') == 'facing' else (ahead, up)
+    return np.column_stack([x, np.cross(z, x), z])
+
+
 def sound_point(direction, cfg, distance_mm=None):
     """Likely sound position in the base frame: out from the array along its measured direction.
 
-    direction: unit vector in the array's own frame (x = front edge, y = left, z = up), as doa.py gives it.
+    direction: unit vector in the array's own frame, as doa.py gives it.
     """
-    a = cfg['array']
-    d = rot_z(a['front_yaw_deg']) @ np.asarray(direction, float)
-    return np.asarray(a['position_mm'], float) + (distance_mm or cfg['aim']['assumed_distance_mm']) * d
+    d = array_axes(cfg) @ np.asarray(direction, float)
+    return np.asarray(cfg['array']['position_mm'], float) + (distance_mm or cfg['aim']['assumed_distance_mm']) * d
+
+
+def base_to_array(points_mm, cfg):
+    """Base-frame points (mm, any leading shape) -> the array's own frame in meters, for doa.srp_points."""
+    return (np.asarray(points_mm, float) - np.asarray(cfg['array']['position_mm'], float)) @ array_axes(cfg) / 1000.0
+
+
+def base_bearing(direction, cfg):
+    """(bearing, elevation) in degrees of an array-frame direction, in the base frame. Bearing + = right of +X."""
+    d = array_axes(cfg) @ np.asarray(direction, float)
+    return -math.degrees(math.atan2(d[1], d[0])), math.degrees(math.asin(max(-1.0, min(1.0, d[2]))))
 
 
 def j1_to_face(target, pointer):
@@ -106,11 +129,13 @@ def camera_axes(yaw_deg, pitch_deg):
 
 
 def camera_to_base(point, cfg):
-    """Point from the camera beside the base (mm; x right, y down, z out of the lens, as depth
-    cameras report it) -> arm base frame. An arm-mounted camera goes through Viam's frame system."""
+    """Point(s) from the camera beside the base (mm; x right, y down, z out of the lens, as depth
+    cameras report it; shape (3,) or (N, 3)) -> arm base frame. An arm-mounted camera goes through
+    Viam's frame system instead."""
     c = cfg['camera']['base']
     right, down, lens = camera_axes(c['yaw_deg'], c['pitch_deg'])
-    return np.asarray(c['position_mm'], float) + point[0] * right + point[1] * down + point[2] * lens
+    p = np.asarray(point, float)
+    return np.asarray(c['position_mm'], float) + p[..., :1] * right + p[..., 1:2] * down + p[..., 2:3] * lens
 
 
 def view_position(target, cfg):
