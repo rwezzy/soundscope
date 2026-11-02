@@ -286,22 +286,44 @@ def draw(frame, view, target, note):
     return out
 
 
-def run(args, cfg):
+def listen(events):
+    """Mic listener, run in its own process: the camera SDK holds Python's lock while it waits for
+    frames, which froze a listener thread in the same process completely (measured: 0 frames/s)."""
     from arm_follow import Listener
+    listener = Listener(events.put, updates=True)
+    listener.start()
+    listener.ready.wait()
+    events.put({'kind': 'error', 'message': str(listener.error)} if listener.error else {'kind': 'ready'})
+    listener.join()
+
+
+def pending(events):
+    """Sound reports waiting in the queue from the listener process."""
+    while True:
+        try:
+            yield events.get_nowait()
+        except queue.Empty:
+            return
+
+
+def run(args, cfg):
+    import multiprocessing
     from camera import Gemini
 
-    events = queue.Queue()
     meta = None
     if args.target:
         try:
             meta = Meta()
         except MetaError as exc:
             raise SystemExit(f'Meta: {exc}')
-    listener = Listener(events.put, updates=True)
-    listener.start()
-    listener.ready.wait()
-    if listener.error:
-        raise SystemExit(f'Microphone problem: {listener.error}')
+    events = multiprocessing.Queue()
+    multiprocessing.Process(target=listen, args=(events,), daemon=True).start()
+    try:
+        first = events.get(timeout=30)
+    except queue.Empty:
+        raise SystemExit('The microphone listener did not start within 30 s.')
+    if first['kind'] == 'error':
+        raise SystemExit(f"Microphone problem: {first['message']}")
     cam, loc = Gemini(), Localizer()
     ui = {'note': 'Listening. c = calibrate, s = snapshot, q = quit', 'last': None}  # last = (time, fix)
     cal = {'active': False, 'click': None}
@@ -323,8 +345,7 @@ def run(args, cfg):
                     break
                 continue
             frame, depth, k = got
-            while not events.empty():
-                ev = events.get_nowait()
+            for ev in pending(events):
                 final = ev['kind'] == 'sound'
                 view = make_view(ev, final, loc, depth, k, cfg)
                 ui['last'] = (time.monotonic(), ev['fix'])  # a sound still playing counts too
