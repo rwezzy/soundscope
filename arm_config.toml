@@ -33,7 +33,7 @@ pitch_sign = 1                 # set to -1 if J5 tilts the camera the wrong way
 #            Best for the camera view: it hears up/down too, so a sound maps to one spot.
 mount = "facing"
 position_mm = [0, 0, -80]      # board center in the base frame [forward, left, up]
-front_yaw_deg = -60.7              # from +X toward +Y; `python scope.py` press c to calibrate it
+front_yaw_deg = 0              # from +X toward +Y; `python scope.py` press c to calibrate it
 # Right now (camera demo, no arm) the CAMERA is the origin: board standing 8 cm below the lens.
 # When the arm comes back, measure the board and camera from the arm base instead.
 

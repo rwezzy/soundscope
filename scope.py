@@ -279,7 +279,7 @@ def draw(frame, view, target, note):
             yes = not rejected
             label(out, f"Muse Spark: {verdict['heard']} - {'YES' if yes else 'not'} {target}", (12, 66),
                   (0, 255, 0) if yes else (160, 160, 160))
-    if 'reach' in view:
+    if 'reach' in view and view.get('show_reach'):
         ok, radius = view['reach']
         label(out, f"{'within' if ok else 'out of'} the arm's reach ({radius / 1000:.2f} m from its base)",
               (12, 100 if target else 66), (0, 255, 0) if ok else (200, 200, 200), 0.6)
@@ -348,6 +348,7 @@ def run(args, cfg):
             for ev in pending(events):
                 final = ev['kind'] == 'sound'
                 view = make_view(ev, final, loc, depth, k, cfg)
+                view['show_reach'] = args.reach
                 ui['last'] = (time.monotonic(), ev['fix'])  # a sound still playing counts too
                 if final or time.monotonic() - ui.get('printed', 0) > 1.0:
                     print(f"{time.strftime('%H:%M:%S')} {'heard' if final else 'hearing'}: {summary(view)}", flush=True)
@@ -388,6 +389,7 @@ def main():
     p.add_argument('--target', help='also ask Muse Spark whether the sound is this')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
     p.add_argument('--seconds', type=float, help='stop after this long')
+    p.add_argument('--reach', action='store_true', help="also say whether the spot is within the arm's reach")
     p.add_argument('--env-file', help='also load keys from this .env file')
     args = p.parse_args()
     load_env(ENV_FILE)

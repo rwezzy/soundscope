@@ -19,10 +19,13 @@ HOP = 256               # 16 ms between frames
 SPEED_OF_SOUND = 343.0  # m/s at about 20 C
 UPSAMPLE = 16           # cross-correlation lag resolution: 1/16 sample, about 1.3 mm of path
 
-# Raw mic positions in meters, board frame: x = front edge, y = left, z = up.
-# Order: front-right, front-left, back-left, back-right. A 66 mm square, from the
-# chip's AEC_MIC_ARRAY_GEO readout on the Seeed wiki.
-MIC_XYZ = 0.033 * np.array([[1, -1, 0], [1, 1, 0], [-1, 1, 0], [-1, -1, 0]], float)
+# Raw mic positions in meters, board frame seen from the LED side: x = front (cable) edge,
+# y = left, z = out of the LED side. Order (channels 2-5): front-left, front-right, back-right,
+# back-left; a 66 mm square. This is the chip's AEC_MIC_ARRAY_GEO table mirrored (y flipped):
+# the table reads as if seen from the back of the board. Confirmed Nov 2, 2026 by the tap test
+# (channels [3, 2, 5, 4] in the old order), a live camera recording, and a laptop-speaker test
+# that read 45 deg right with the table as-is and 45 deg left (correct) mirrored.
+MIC_XYZ = 0.033 * np.array([[1, 1, 0], [1, -1, 0], [-1, -1, 0], [-1, 1, 0]], float)
 
 
 def direction_grid(az_step=1.0, el_step=2.5):

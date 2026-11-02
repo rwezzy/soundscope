@@ -36,7 +36,7 @@ MAP_FILE = HERE / 'mic_map.json'
 RECORDINGS = HERE / 'recordings'
 CHANNELS = 6
 DEFAULT_RAW = [2, 3, 4, 5]  # Seeed's 6-channel map: 0-1 processed, 2-5 raw mics 0-3
-POSITIONS = ['front-right', 'front-left', 'back-left', 'back-right']  # same order as MIC_XYZ
+POSITIONS = ['front-left', 'front-right', 'back-right', 'back-left']  # same order as MIC_XYZ
 API_ORDER = ['Windows WDM-KS', 'Windows WASAPI', 'MME', 'Windows DirectSound']
 Z_OK, Z_SOLID = 6.0, 12.0  # peak height in noise standard deviations
 
