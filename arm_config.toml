@@ -32,9 +32,13 @@ pitch_sign = 1                 # set to -1 if J5 tilts the camera the wrong way
 # "facing" = standing up, LED side facing front_yaw_deg (usually the camera's way), cable edge up.
 #            Best for the camera view: it hears up/down too, so a sound maps to one spot.
 mount = "facing"
+cable_edge = "up"              # "facing" only: which way the USB cable edge points, "up" or "down"
 position_mm = [0, 0, -80]      # board center in the base frame [forward, left, up]
 front_yaw_deg = 0              # from +X toward +Y; `python scope.py` press c to calibrate it
 # Right now (camera demo, no arm) the CAMERA is the origin: board standing 8 cm below the lens.
+# With the printed rig (cad/soundscope_rig.stl) use exactly:
+#   cable_edge = "down"
+#   position_mm = [-2, 0, -73.5]
 # When the arm comes back, measure the board and camera from the arm base instead.
 
 [look]

@@ -20,6 +20,7 @@ Find where a sound is coming from, and turn a robot arm's camera toward it.
 | `meta_api.py` | Meta Model API calls |
 | `test_arm.py`, `test_scope.py` | Offline tests |
 | `ARM_SETUP.md` | Arm, Viam and offset setup |
+| `cad/` | 3D-printed rig holding the camera and mic board (`soundscope_rig.stl`, made by `rig.py`) |
 
 ## Quick start
 ```
@@ -31,3 +32,10 @@ python scope.py
 ```
 The mic array needs the 16 kHz 6-channel firmware (steps at the top of `mic_test.py`).
 For Meta features, copy `.env.example` to `.env` and add your key.
+
+## Mount
+Print `cad/soundscope_rig.stl` upside down (camera plate on the bed), no supports, PLA or PETG.
+Hardware: 2x M3x6 (camera), 2x M2x10 self-tapping (board), 1x 1/4"-20 hex nut (tripod).
+The board hangs under the camera's color lens, LED side forward, cable down; it is held only by
+the two holes opposite its USB port, so the mics stay uncovered. Then set `cable_edge = "down"` and
+`position_mm = [-2, 0, -73.5]` under `[array]` in `arm_config.toml`.

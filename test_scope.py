@@ -95,6 +95,17 @@ class View(unittest.TestCase):
                 self.assertGreater(on_box / max(1, np.count_nonzero(what == label)), 0.5)  # covers the box
                 self.assertGreater(on_box / np.count_nonzero(filled), 0.7)                 # not the table
 
+    def test_printed_rig_orientation_finds_the_box_too(self):
+        cfg = scope_config()
+        cfg['array'].update(cable_edge='down', position_mm=[-2, 0, -73.5])  # values from cad/rig.py
+        axes = aim.array_axes(cfg)
+        self.assertAlmostEqual(np.linalg.det(axes), 1.0)                     # a real rotation, not a mirror
+        np.testing.assert_allclose(axes[:, 0], [0, 0, -1], atol=1e-9)        # cable edge points down
+        depth, what = render(cfg)
+        loc, fix = heard_from((RIGHT_BOX[0] + RIGHT_BOX[1]) / 2, cfg)
+        u, v = scope.make_view({'fix': fix}, False, loc, depth, K, cfg)['spot']
+        self.assertEqual(what[v, u], 2)
+
     def test_sound_beside_the_camera_points_off_screen(self):
         cfg = scope_config()
         depth, _ = render(cfg)

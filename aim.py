@@ -64,12 +64,16 @@ def array_axes(cfg):
     """Rotation from the array's own frame (x = cable edge, z = LED side) to the base frame.
 
     mount "flat": lying down, LEDs up, cable edge toward front_yaw_deg.
-    mount "facing": standing up, LEDs facing front_yaw_deg, cable edge pointing up.
+    mount "facing": standing up, LEDs facing front_yaw_deg, cable edge pointing up
+    (or down, with cable_edge = "down", as in the printed rig).
     """
     a = cfg['array']
     yaw = math.radians(a['front_yaw_deg'])
     ahead, up = np.array([math.cos(yaw), math.sin(yaw), 0.0]), np.array([0.0, 0.0, 1.0])
-    x, z = (up, ahead) if a.get('mount', 'flat') == 'facing' else (ahead, up)
+    if a.get('mount', 'flat') == 'facing':
+        x, z = (-up if a.get('cable_edge', 'up') == 'down' else up), ahead
+    else:
+        x, z = ahead, up
     return np.column_stack([x, np.cross(z, x), z])
 
 
