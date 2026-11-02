@@ -28,9 +28,47 @@ import sounddevice as sd
 import aim
 from doa import FS, HOP, N_FFT, Localizer, Tracker
 from meta_api import ENV_FILE, Meta, MetaError, load_env, wav_bytes
-from mic_test import CHANNELS, as_float, bearing, find_array, raw_channels, record, side
+from mic_test import CHANNELS, as_float, bearing, find_array, raw_channels, side
 
 ASR_CHANNEL = 1  # the XVF3800's processed output tuned for speech recognition
+LISTENER_STARTUP_TIMEOUT_S = 15.0
+LISTENER_STOP_TIMEOUT_S = 2.0
+
+
+class _ListenerStopped(Exception):
+    pass
+
+
+def record(dev, seconds, *, stop_event=None, timeout=None):
+    """Bounded room calibration; a missing audio callback must not hang startup."""
+    stop_event = stop_event or threading.Event()
+    if stop_event.is_set():
+        raise _ListenerStopped()
+    samples = np.empty((int(seconds * FS), CHANNELS), dtype=np.int32)
+    done, pos = threading.Event(), 0
+
+    def capture(indata, _frames, _time_info, status):
+        nonlocal pos
+        if stop_event.is_set() or done.is_set():
+            return
+        if status and getattr(status, 'input_overflow', False):
+            return  # learn the floor only from intact samples
+        take = min(len(indata), len(samples) - pos)
+        samples[pos:pos + take] = indata[:take]
+        pos += take
+        if pos == len(samples):
+            done.set()
+
+    deadline = time.monotonic() + (seconds + 3.0 if timeout is None else timeout)
+    with sd.InputStream(device=dev, channels=CHANNELS, samplerate=FS, dtype='int32', callback=capture):
+        while not done.wait(0.05):
+            if stop_event.is_set():
+                raise _ListenerStopped()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Microphone calibration timed out waiting for audio samples.')
+    if stop_event.is_set():
+        raise _ListenerStopped()
+    return samples
 
 LIVE_CHECKLIST = """Before the arm moves:
   - The E-stop button is in your hand or within reach, and nobody is inside the arm's reach.
@@ -44,50 +82,193 @@ def stamp():
 
 
 class Listener(threading.Thread):
-    """Mic thread: finds sounds with the direction tracker and keeps recent audio for Meta."""
+    """Bounded mic worker. Sound times are monotonic capture times, never queue-arrival times.
 
-    def __init__(self, post, keep_s=8.0, updates=False):
+    ``event_id`` is stable across a sound's updates/end. ``observed_at`` is the last
+    tracker-active frame's capture time; a quiet tail never refreshes it. Diagnostics
+    have kind ``warning``/``error`` and a message, without a sound ``fix``.
+    """
+
+    def __init__(self, post, keep_s=8.0, updates=False, *, queue_blocks=32, input_timeout=3.0):
         super().__init__(daemon=True)
-        self.dev, self.chans, self.post, self.updates = find_array(), raw_channels(), post, updates
-        self.buf = np.zeros((int(keep_s * FS), CHANNELS), np.float32)
+        if queue_blocks < 1 or keep_s <= 0 or input_timeout <= 0:
+            raise ValueError('Listener queue, history, and input timeout must be positive.')
+        self.dev, self.chans = None, None
+        self.post, self.updates = post, updates
+        self.buf = np.zeros((max(1, int(keep_s * FS)), CHANNELS), np.float32)
         self.pos = 0
         self.mute_until = 0.0
         self.voice = None  # [samples still needed, chunks, done event] while a command is recorded
         self.ready = threading.Event()
+        self.stop_event = threading.Event()
+        self.stopped = threading.Event()
         self.error = None
+        self.audio_queue = queue.Queue(maxsize=queue_blocks)
+        self.input_timeout = input_timeout
+        self.dropped_blocks, self.overflows = 0, 0
+        self._sequence = 0
+        self._status = ''
+        self._reported_status = (0, 0, '')
+        self._last_warning = -math.inf
+        self._adc_clock_offset = None
+        self._previous_adc_end = None
+
+    def wait_ready(self, timeout=LISTENER_STARTUP_TIMEOUT_S):
+        """Wait at most timeout seconds; inspect error after a True result."""
+        ready = self.ready.wait(timeout)
+        if not ready:
+            self.stop(timeout=0)
+        return ready
+
+    def stop(self, timeout=LISTENER_STOP_TIMEOUT_S):
+        """Request shutdown and wait boundedly, including when no audio arrives."""
+        self.stop_event.set()
+        if self.voice:
+            self.voice[2].set()
+        if self.ident is not None and threading.current_thread() is not self:
+            self.join(timeout)
+        return not self.is_alive()
+
+    def _capture_time(self, time_info, samples):
+        now = time.monotonic()
+        # Some WDM-KS drivers report ADC time since stream start but currentTime
+        # as system uptime. Subtracting those clocks made every event days old.
+        # Anchor that independent ADC clock to its first callback, then preserve
+        # sample-time progression so delayed callbacks cannot refresh old audio.
+        if time_info is not None:
+            try:
+                adc, current = float(time_info.inputBufferAdcTime), float(time_info.currentTime)
+                if math.isfinite(adc) and math.isfinite(current) and adc >= 0:
+                    adc_end = adc + samples / FS
+                    same_clock = 0 <= current - adc <= 2.0
+                    if same_clock:
+                        return min(now, now - current + adc_end)
+                    if (self._adc_clock_offset is None or
+                            (self._previous_adc_end is not None and adc_end < self._previous_adc_end)):
+                        self._adc_clock_offset = now - adc_end
+                    # Keep the earliest observed offset; callback scheduling may
+                    # be late, but it must never move capture time into the future.
+                    self._adc_clock_offset = min(self._adc_clock_offset, now - adc_end)
+                    self._previous_adc_end = adc_end
+                    return min(now, adc_end + self._adc_clock_offset)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return now
+
+    def _capture(self, indata, _frames, time_info, status):
+        if self.stop_event.is_set() or not len(indata):
+            return
+        captured_at = self._capture_time(time_info, len(indata))
+        overflow = bool(status and getattr(status, 'input_overflow', False))
+        if status:
+            self._status = str(status)
+            self.overflows += int(overflow)
+        item = (indata.copy(), captured_at, self._sequence, overflow)
+        self._sequence += 1
+        try:
+            self.audio_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self.audio_queue.get_nowait()  # discard oldest, preserving current audio
+                self.dropped_blocks += 1
+            except queue.Empty:
+                pass
+            self.audio_queue.put_nowait(item)
+
+    def _report_status(self, force=False):
+        current = (self.dropped_blocks, self.overflows, self._status)
+        now = time.monotonic()
+        if current != self._reported_status and (force or now - self._last_warning >= 1.0):
+            self._reported_status, self._last_warning = current, now
+            self.post({'kind': 'warning', 'message':
+                       f'Microphone backlog: {current[0]} dropped blocks, {current[1]} input overflows.'
+                       + (f' {current[2]}' if current[2] else ''),
+                       'dropped_blocks': current[0], 'overflows': current[1], 'emitted_at': now})
 
     def run(self):
         try:
+            if self.stop_event.is_set():
+                return
+            self.dev, self.chans = find_array(), raw_channels()
+            if self.stop_event.is_set():
+                return
             loc = Localizer()
             print('Measuring the room for 2 s, stay quiet...')
-            loc.calibrate(as_float(record(self.dev, 2.0), self.chans))
-            tracker, q = Tracker(loc), queue.Queue()
+            loc.calibrate(as_float(record(self.dev, 2.0, stop_event=self.stop_event), self.chans))
+            if self.stop_event.is_set():
+                return
+            tracker = Tracker(loc)
             frame, pending = np.zeros((N_FFT, len(self.chans))), np.zeros((0, len(self.chans)))
+            previous_sequence = -1
+            event_id, active_event, observed_at, onset_at = 0, None, None, None
             with sd.InputStream(device=self.dev, channels=CHANNELS, samplerate=FS, dtype='float32',
-                                callback=lambda indata, *_: q.put(indata.copy())):
+                                callback=self._capture):
                 self.ready.set()
-                while True:
-                    block = q.get()
+                last_input = time.monotonic()
+                while not self.stop_event.is_set():
+                    self._report_status()
+                    try:
+                        block, captured_at, sequence, overflow = self.audio_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        if time.monotonic() - last_input >= self.input_timeout:
+                            raise TimeoutError('Microphone stopped delivering audio samples.')
+                        continue
+                    last_input = time.monotonic()
+                    if overflow or sequence != previous_sequence + 1:
+                        # Never stitch across a dropped span or finish an old sound
+                        # with new audio after a backlog has been discarded.
+                        tracker = Tracker(loc)
+                        frame.fill(0)
+                        pending = pending[:0]
+                        self.pos = 0  # the retained WAV must not bridge missing audio either
+                        active_event, observed_at, onset_at = None, None, None
+                    previous_sequence = sequence
                     self._keep(block)
                     pending = np.concatenate([pending, block[:, self.chans]])
-                    while len(pending) >= HOP:
+                    while len(pending) >= HOP and not self.stop_event.is_set():
                         frame = np.concatenate([frame[HOP:], pending[:HOP]])
                         pending = pending[HOP:]
+                        was_quiet = tracker.quiet >= tracker.gap
                         out = tracker.push(loc.stft(frame)[0])
-                        if not (out and out[1]) or time.monotonic() < self.mute_until:
+                        if tracker.quiet == 0:  # Tracker adds evidence only on active frames
+                            observed_at = captured_at - len(pending) / FS
+                            if active_event is None or was_quiet:
+                                event_id += 1
+                                active_event, onset_at = event_id, observed_at
+                        ended = bool(out and out[0] == 'end')
+                        if not (out and out[1]) or observed_at is None or time.monotonic() < self.mute_until:
+                            if ended:
+                                active_event, observed_at, onset_at = None, None, None
                             continue
-                        if out[0] == 'end':
+                        event = {'kind': 'sound' if ended else 'update', 'fix': out[1],
+                                 'event_id': active_event, 'observed_at': observed_at,
+                                 'onset_at': onset_at, 'emitted_at': time.monotonic()}
+                        if ended:
                             clip = self._recent(min(out[1]['seconds'] + 0.9, 6.0))  # the sound + its quiet tail
-                            self.post({'kind': 'sound', 'fix': out[1],
-                                       'wav': wav_bytes(clip[:, self.chans].mean(axis=1))})
+                            event['wav'] = wav_bytes(clip[:, self.chans].mean(axis=1))
+                            event['emitted_at'] = time.monotonic()
+                            self.post(event)
+                            active_event, observed_at, onset_at = None, None, None
                         elif self.updates:  # running estimate while the sound is still playing
-                            self.post({'kind': 'update', 'fix': out[1]})
-        except Exception as exc:  # report mic trouble in the main thread
+                            self.post(event)
+        except _ListenerStopped:
+            pass
+        except (Exception, SystemExit) as exc:  # find_array also reports device failures via SystemExit
             self.error = exc
-            self.ready.set()
+            self.post({'kind': 'error', 'message': str(exc), 'emitted_at': time.monotonic()})
+        finally:
+            self.stop_event.set()
+            if self.voice:
+                self.voice[2].set()
+            try:
+                self._report_status(force=True)
+            finally:
+                self.ready.set()
+                self.stopped.set()
 
     def _keep(self, block):
-        self.buf[(self.pos + np.arange(len(block))) % len(self.buf)] = block
+        tail = block[-len(self.buf):]
+        self.buf[(self.pos + len(block) - len(tail) + np.arange(len(tail))) % len(self.buf)] = tail
         self.pos += len(block)
         if self.voice:
             need, chunks, done = self.voice
@@ -103,6 +284,8 @@ class Listener(threading.Thread):
 
     def record_command(self, seconds=4.0):
         """Record a spoken command from the speech channel; sounds are ignored meanwhile."""
+        if self.stop_event.is_set():
+            return None
         chunks, done = [], threading.Event()
         self.mute_until = time.monotonic() + seconds + 1.0  # don't turn toward your own voice
         self.voice = [int(seconds * FS), chunks, done]
@@ -374,6 +557,7 @@ async def follow(args, cfg):
     except MetaError as exc:
         raise SystemExit(f'Meta: {exc}')
     arm = await open_arm(args, cfg)
+    listener = None
     try:
         gate = aim.Gate(cfg, await arm.joints())
         pointer = await arm.pointer(cfg)
@@ -381,13 +565,13 @@ async def follow(args, cfg):
         print(f"{'DRY RUN, nothing will move. ' if arm.dry else ''}Pointing the {what}. Start J1 {gate.start[0]:.0f}°, "
               f"allowed {gate.ranges[0][0]:.0f}°..{gate.ranges[0][1]:.0f}°." +
               (f' Only sounds Muse Spark hears as "{target}".' if target else ''))
-        listener = None
         if args.cmd == 'simulate':
             asyncio.create_task(feed_simulated(args.bearings, post, cfg['safety']['min_interval_s'] + 0.3))
         else:
             listener = Listener(post)
             listener.start()
-            await loop.run_in_executor(None, listener.ready.wait)
+            if not await loop.run_in_executor(None, listener.wait_ready):
+                raise SystemExit(f'Microphone listener did not start within {LISTENER_STARTUP_TIMEOUT_S:g} s.')
             if listener.error:
                 raise SystemExit(f'Microphone problem: {listener.error}')
             if voice:
@@ -402,10 +586,25 @@ async def follow(args, cfg):
                 continue
             if ev['kind'] == 'done':
                 break
-            await (follower.on_sound(ev) if ev['kind'] == 'sound' else follower.on_voice(ev))
+            if ev['kind'] == 'error':
+                raise SystemExit(f"Microphone problem: {ev['message']}")
+            if ev['kind'] == 'warning':
+                print(f"Microphone warning: {ev['message']}")
+            elif ev['kind'] == 'sound':
+                await follower.on_sound(ev)
+            elif ev['kind'] == 'voice':
+                await follower.on_voice(ev)
     finally:
-        await arm.stop()
-        await arm.close()
+        if listener:
+            listener.stop(timeout=0)
+        try:
+            await arm.stop()
+        finally:
+            try:
+                await arm.close()
+            finally:
+                if listener:
+                    listener.stop()
 
 
 def cmd_where(args, cfg):

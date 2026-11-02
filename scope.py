@@ -1,19 +1,20 @@
-"""SoundScope live view: the Gemini 2 picture with the sound's location drawn on it.
+"""SoundScope: acoustic source candidates over the Gemini 2 image.
 
   python scope.py                            live view; make a sound
   python scope.py --target "keys jingling"   also ask Muse Spark what the sound is
   python scope.py --record demo.mp4          also save the annotated video
 
-Keys in the window: c = calibrate, s = snapshot, q = quit.
-Calibrate: press c, play a sound, and click its source in the picture. The board's direction
-(front_yaw_deg in arm_config.toml) is corrected from that.
+Keys: C = three-position calibration, Enter = apply, Esc = cancel,
+H = heat map, D = diagnostics, Space = pause, S = evidence snapshot, Q = quit.
 
-The sound alone picks the spot: every 3D point the depth camera sees is scored by how well a
-sound from there fits what the four mics heard (the heat map). The outline comes from depth only.
-No image detection.
+Visible 3D points are scored against the four microphones. The support region is a
+candidate, not a confirmed source. A depth contour is available in diagnostics.
+Default mode makes no Meta requests and does not connect to the robot.
 """
 import argparse
 import math
+import json
+import os
 import queue
 import re
 import threading
@@ -26,13 +27,15 @@ import numpy as np
 import aim
 from camera import backproject, project
 from doa import Localizer
+from calibration import CalibrationSession, wrap_deg
+from localization_quality import assess
+import scope_ui
 from meta_api import ENV_FILE, Meta, MetaError, load_env
-from mic_test import side, sureness
 
 WINDOW = 'SoundScope'
 GRID_STEP = 8        # score every 8th pixel
 NO_DEPTH_M = 2.5     # assumed distance where the depth camera sees nothing
-HOLD_S, FADE_S = 3.0, 1.0
+MAX_AGE_S = 1.2     # from capture, not from when a queued report reaches the screen
 SNAPSHOTS = Path(__file__).with_name('recordings') / 'snapshots'
 
 
@@ -41,19 +44,19 @@ def score_view(loc, gcc, depth_mm, k, cfg, step=GRID_STEP):
     h, w = depth_mm.shape
     v, u = np.mgrid[step // 2:h:step, step // 2:w:step]
     z = depth_mm[v, u] / 1000.0
-    has_depth = z > 0.1
+    has_depth = np.isfinite(z) & (z > 0.1)
     points = backproject(u, v, np.where(has_depth, z, NO_DEPTH_M), k)
     in_array = aim.base_to_array(aim.camera_to_base(points.reshape(-1, 3) * 1000.0, cfg), cfg)
     return loc.srp_points(gcc, in_array).reshape(z.shape), u, v, points, has_depth
 
 
 def best_spot(scores, has_depth, points):
-    """Grid index of the sound's spot: the best-scoring measured point, with near-ties going to the
-    nearer surface (anything farther along the same line is hidden behind it)."""
-    norm = (scores - np.median(scores)) / max(float(scores.max() - np.median(scores)), 1e-9)
-    pick = np.where(has_depth, norm - 0.05 * points[..., 2], -np.inf)
-    if not np.isfinite(pick).any() or norm[has_depth].max() < 0.8:
-        pick = norm  # the sound is somewhere the depth camera can't measure
+    """Best acoustic score, with no arbitrary preference for a closer surface.
+
+    The peak is only a candidate: depth at its pixel is not measured acoustic range.
+    Missing-depth pixels use an assumed scoring distance and cannot supply a range.
+    """
+    pick = np.where(np.isfinite(scores), scores, -np.inf)
     return np.unravel_index(int(np.argmax(pick)), scores.shape)
 
 
@@ -145,15 +148,21 @@ def outline(depth_mm, k, u, v, radius_m=0.12, rng=None):
 def make_view(ev, final, loc, depth_mm, k, cfg):
     """Everything to draw for one sound estimate."""
     fix = ev['fix']
-    view = {'time': time.monotonic(), 'final': final, 'fix': fix}
+    view = {'time': ev.get('observed_at', time.monotonic()), 'final': final, 'fix': fix,
+            'event_id': ev.get('event_id'), 'expires_after': MAX_AGE_S}
     away = off_screen(fix['direction'], cfg, k, depth_mm.shape)
     if away:
         view['off_screen'] = away
+        strong = fix.get('z', 0) >= 12 and fix.get('coherence', 0) >= 0.10
+        view['quality'] = {'state': 'candidate' if strong else 'weak',
+                           'reason': 'Direction outside the camera view; object unverified.',
+                           'peak_score': fix.get('coherence', 0), 'support_fraction': 0.0}
         return view
     scores, us, vs, points, has_depth = score_view(loc, loc.gcc(*fix['evidence'][:2]), depth_mm, k, cfg)
     i, j = best_spot(scores, has_depth, points)
     view.update(scores=scores, spot=(int(us[i, j]), int(vs[i, j])), point=points[i, j],
                 measured=bool(has_depth[i, j]))
+    view['quality'], view['support_mask'] = assess(scores, fix)
     if final:
         view['contour'] = outline(depth_mm, k, *view['spot'])
         view['reach'] = aim.reach_check(aim.camera_to_base(points[i, j] * 1000.0, cfg), cfg)
@@ -199,8 +208,12 @@ def calibrate_step(cal, ui, cfg, depth_mm, k):
 
 def save_front_yaw(value):
     text = aim.CONFIG_FILE.read_text(encoding='utf-8')
-    aim.CONFIG_FILE.write_text(re.sub(r'(?m)^(front_yaw_deg\s*=\s*)-?[\d.]+', rf'\g<1>{value:.1f}', text, count=1),
-                               encoding='utf-8')
+    updated, count = re.subn(r'(?m)^(front_yaw_deg\s*=\s*)-?[\d.]+', rf'\g<1>{value:.3f}', text, count=1)
+    if count != 1 or not math.isfinite(value):
+        raise ValueError('Cannot save calibration: missing yaw setting or invalid value.')
+    temporary = aim.CONFIG_FILE.with_suffix('.toml.tmp')
+    temporary.write_text(updated, encoding='utf-8')
+    os.replace(temporary, aim.CONFIG_FILE)
 
 
 def check_sound(meta, wav, target, view):
@@ -213,92 +226,146 @@ def check_sound(meta, wav, target, view):
     view['verdict'] = verdict
 
 
-def label(img, text, org, color=(255, 255, 255), scale=0.7):
-    (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 2)
-    x, y = org
-    cv2.rectangle(img, (x - 5, y - th - 7), (x + tw + 5, y + base + 3), (0, 0, 0), -1)
-    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2, cv2.LINE_AA)
-
-
-def heat_overlay(img, scores, strength, gray=False):
-    s = scores - np.median(scores)
-    s = np.clip(s / max(float(s.max()), 1e-9), 0, 1) ** 2
-    heat = np.clip(cv2.resize(s.astype(np.float32), (img.shape[1], img.shape[0]),
-                              interpolation=cv2.INTER_CUBIC), 0, 1)
-    colored = cv2.applyColorMap((heat * 255).astype(np.uint8), cv2.COLORMAP_JET)
-    if gray:
-        colored = cv2.cvtColor(cv2.cvtColor(colored, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
-    alpha = (heat * 0.55 * strength)[..., None]
-    img[:] = (img * (1 - alpha) + colored * alpha).astype(np.uint8)
-
-
 def summary(view):
-    """One line: where the sound is and how sure."""
-    fix = view['fix']
-    sure = f"{sureness(fix['z'])} (z {fix['z']:.0f})"
+    quality = view['quality']['state']
     if 'off_screen' in view:
-        where, deg = view['off_screen']
-        return f'sound off camera, {deg:.0f} deg {where}   {sure}'
-    x, y, z = view['point']
-    dist = f'{math.sqrt(x * x + y * y + z * z):.2f} m away' if view['measured'] else 'distance unknown'
-    return f"{dist}, {side(math.degrees(math.atan2(x, z))).replace('°', ' deg')}   {sure}"
+        edge, angle = view['off_screen']
+        return f'{quality}: direction {angle:.0f} deg {edge}; source unverified'
+    distance = f"{np.linalg.norm(view['point']):.2f} m" if view['measured'] else 'unknown'
+    text = f"{quality}: candidate surface {distance}; {view['quality']['reason']}"
+    if view.get('show_reach') and 'reach' in view:
+        inside, radius = view['reach']
+        text += f"; configured workspace: {'inside' if inside else 'outside'} ({radius:.0f} mm)"
+    return text
 
 
-def draw(frame, view, target, note):
-    out = frame.copy()
-    h, w = out.shape[:2]
-    label(out, note, (12, h - 16), (200, 255, 200) if note.startswith('Calibrat') else (255, 255, 255), 0.6)
-    if view is None:
-        return out
-    age = time.monotonic() - view['time']
-    if view['final'] and age > HOLD_S + FADE_S:
-        return out
-    fade = 1.0 if not view['final'] or age <= HOLD_S else 1 - (age - HOLD_S) / FADE_S
-    if 'off_screen' in view:
-        where, _ = view['off_screen']
-        tip = {'right': (w - 30, h // 2), 'left': (30, h // 2), 'above': (w // 2, 30), 'below': (w // 2, h - 50)}[where]
-        tail = (tip[0] + (w // 2 - tip[0]) // 3, tip[1] + (h // 2 - tip[1]) // 3)
-        cv2.arrowedLine(out, tail, tip, (0, 200, 255), 8, tipLength=0.4)
-        label(out, summary(view), (12, 32), (0, 200, 255))
-        return out
-    rejected = view.get('rejected', False)
-    heat_overlay(out, view['scores'], fade * (0.4 if rejected else 1.0), gray=rejected)
-    color = (130, 130, 130) if rejected else (0, 255, 0)
-    if view.get('contour') is not None:
-        cv2.drawContours(out, [view['contour']], -1, color, 3)
-    u, v = view['spot']
-    cv2.circle(out, (u, v), 18, color, 3)
-    cv2.line(out, (u - 30, v), (u + 30, v), color, 2)
-    cv2.line(out, (u, v - 30), (u, v + 30), color, 2)
-    label(out, summary(view), (12, 32))
-    if target:
-        verdict = view.get('verdict')
-        if verdict is None:
-            label(out, f'Muse Spark: checking for "{target}"...', (12, 66), (0, 220, 255))
-        else:
-            yes = not rejected
-            label(out, f"Muse Spark: {verdict['heard']} - {'YES' if yes else 'not'} {target}", (12, 66),
-                  (0, 255, 0) if yes else (160, 160, 160))
-    if 'reach' in view and view.get('show_reach'):
-        ok, radius = view['reach']
-        label(out, f"{'within' if ok else 'out of'} the arm's reach ({radius / 1000:.2f} m from its base)",
-              (12, 100 if target else 66), (0, 255, 0) if ok else (200, 200, 200), 0.6)
-    return out
+def draw(frame, view, target, note, **kwargs):
+    return scope_ui.render(frame, view, target, note, **kwargs)
 
 
-def listen(events):
-    """Mic listener, run in its own process: the camera SDK holds Python's lock while it waits for
-    frames, which froze a listener thread in the same process completely (measured: 0 frames/s)."""
+def initial_viewport():
+    """Start inside the screen; do not let HighGUI squash a tall native canvas."""
+    width, height = 1280, 720
+    if os.name == 'nt':
+        try:
+            import ctypes
+            width = min(width, ctypes.windll.user32.GetSystemMetrics(0) - 100)
+            height = min(height, ctypes.windll.user32.GetSystemMetrics(1) - 140)
+        except (OSError, AttributeError):
+            pass
+    return max(640, width), max(400, height)
+
+
+def window_viewport(previous):
+    """Use the actual drawing area, not an assumed monitor resolution."""
+    try:
+        _, _, width, height = cv2.getWindowImageRect(WINDOW)
+        if width > 0 and height > 0:
+            size = (max(320, int(width)), max(240, int(height)))
+            if size != (width, height):
+                cv2.resizeWindow(WINDOW, *size)
+            return size
+    except cv2.error:
+        pass
+    return previous
+
+
+class CalibrationController:
+    """UI session: fresh audio + exact clicked depth, then explicit application.
+
+    No automatic nearest-depth fallback: a hole on the phone must not calibrate
+    using a wall behind it. Only one observation per sound event is admitted.
+    """
+    def __init__(self):
+        self.active = False
+        self.session = CalibrationSession()
+        self.used_events = set()
+        self.result = None
+        self.initial_yaw = 0.0
+
+    def start(self, cfg):
+        self.__init__()
+        self.active = True
+        self.initial_yaw = cfg['array']['front_yaw_deg']
+        return 'Calibration: sound at LEFT, CENTRE, RIGHT. Click each source while it plays; pause between positions.'
+
+    def click(self, xy, ev, depth, k, cfg, now=None):
+        now = time.monotonic() if now is None else now
+        if ev is None or not 0 <= now - ev.get('observed_at', -float('inf')) <= 0.75:
+            return 'No fresh sound: keep the source still and playing while you click it.'
+        event_id = ev.get('event_id')
+        if event_id is None or event_id in self.used_events:
+            return 'Pause the sound for a second, move it, then play a new sound and click again.'
+        u, v = xy
+        h, w = depth.shape
+        if not (0 <= u < w and 0 <= v < h) or not np.isfinite(depth[v, u]) or depth[v, u] <= 100:
+            return 'No valid depth at that pixel. Click inside the source, not its edge.'
+        p = aim.camera_to_base(backproject(u, v, float(depth[v, u]) / 1000, k) * 1000, cfg)
+        relative = p - np.asarray(cfg['array']['position_mm'], float)
+        heard = aim.array_axes(cfg) @ ev['fix']['direction']
+        if np.linalg.norm(relative[:2]) < 1 or np.linalg.norm(heard[:2]) < 1e-6:
+            return 'This position has no usable horizontal bearing; move the source.'
+        expected_angle = math.degrees(math.atan2(relative[1], relative[0]))
+        heard_angle = math.degrees(math.atan2(heard[1], heard[0]))
+        self.result = self.session.add(expected_angle, heard_angle,
+                                      timestamp=ev['observed_at'], z=ev['fix'].get('z', 0),
+                                      coherence=ev['fix'].get('coherence', 0))
+        if self.result.accepted:
+            self.used_events.add(event_id)
+        if self.result.ready:
+            print(self.result.message, flush=True)
+            return (f'Calibration ready: {self.result.count} positions, residual '
+                    f'{self.result.residual_deg:.1f} deg. ENTER saves; ESC cancels.')
+        return self.result.message
+
+    def apply(self, cfg, save=None):
+        if not self.active or self.result is None or not self.result.ready:
+            return 'Calibration needs three separated, consistent source positions before saving.'
+        value = wrap_deg(self.initial_yaw + self.result.correction_deg)
+        (save or save_front_yaw)(value)  # save must succeed before changing live state
+        cfg['array']['front_yaw_deg'] = value
+        self.active = False
+        return f'Yaw {value:+.1f} deg saved. Test a NEW position; pitch, roll and offsets are unchanged.'
+
+
+def post_latest(events, event):
+    """Never block capture on a slow renderer; bounded queue keeps newest reports."""
+    try:
+        events.put_nowait(event)
+    except queue.Full:
+        try:
+            events.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            events.put_nowait(event)
+        except queue.Full:
+            pass
+
+
+def listen(events, stop):
+    """Keep audio in its own process; the camera SDK can hold Python's lock."""
     from arm_follow import Listener
-    listener = Listener(events.put, updates=True)
-    listener.start()
-    listener.ready.wait()
-    events.put({'kind': 'error', 'message': str(listener.error)} if listener.error else {'kind': 'ready'})
-    listener.join()
+    listener = Listener(lambda ev: post_latest(events, ev), updates=True)
+    try:
+        listener.start()
+        if not listener.wait_ready(timeout=20):
+            post_latest(events, {'kind': 'error', 'message': 'Microphone startup timed out.'})
+            return
+        if listener.error:
+            post_latest(events, {'kind': 'error', 'message': str(listener.error)})
+            return
+        post_latest(events, {'kind': 'ready'})
+        while listener.is_alive() and not stop.wait(0.1):
+            pass
+    except Exception as exc:
+        post_latest(events, {'kind': 'error', 'message': str(exc)})
+    finally:
+        listener.stop()
+        events.cancel_join_thread()
 
 
 def pending(events):
-    """Sound reports waiting in the queue from the listener process."""
     while True:
         try:
             yield events.get_nowait()
@@ -306,82 +373,224 @@ def pending(events):
             return
 
 
+def newest_sound(reports, now, max_age=MAX_AGE_S):
+    """Skip diagnostics and stale audio; never redraw the entire queued backlog."""
+    usable = [ev for ev in reports if ev.get('kind') in ('update', 'sound')
+              and 0 <= now - ev.get('observed_at', -float('inf')) <= max_age]
+    return max(usable, key=lambda ev: (ev['observed_at'], ev['kind'] == 'sound'), default=None)
+
+
+class TimedRecorder:
+    """Resample display frames to 15 fps using elapsed time, without speeding up video."""
+    def __init__(self, path, fps=15, factory=cv2.VideoWriter):
+        self.path, self.fps, self.factory = path, fps, factory
+        self.writer, self.previous, self.started, self.written = None, None, None, 0
+        self.size = None
+
+    def write(self, frame, now):
+        if self.writer is None:
+            self.size = (frame.shape[1], frame.shape[0])
+            self.writer = self.factory(self.path, cv2.VideoWriter_fourcc(*'mp4v'),
+                                       self.fps, self.size)
+            if not self.writer.isOpened():
+                raise RuntimeError(f'Could not open video writer: {self.path}')
+            self.started = now
+            self.previous = frame.copy()
+        due = int((now - self.started) * self.fps) + 1
+        while self.written < due:
+            self.writer.write(self.previous)
+            self.written += 1
+        if (frame.shape[1], frame.shape[0]) != self.size:
+            width, height = self.size
+            scale = min(width / frame.shape[1], height / frame.shape[0])
+            fitted = cv2.resize(frame, (max(1, round(frame.shape[1] * scale)),
+                                        max(1, round(frame.shape[0] * scale))))
+            canvas = np.zeros((height, width, 3), np.uint8)
+            x, y = (width - fitted.shape[1]) // 2, (height - fitted.shape[0]) // 2
+            canvas[y:y + fitted.shape[0], x:x + fitted.shape[1]] = fitted
+            self.previous = canvas
+        else:
+            self.previous = frame.copy()
+
+    def close(self):
+        if self.writer is not None:
+            self.writer.release()
+
+
+def save_snapshot(out, frame, depth, k, cfg, ev, loc, *, frame_at=None):
+    """Save screen plus aligned sensor evidence for offline diagnosis; no API call."""
+    SNAPSHOTS.mkdir(parents=True, exist_ok=True)
+    stem = time.strftime('%Y%m%d-%H%M%S') + f'-{time.time_ns() % 1000000:06d}'
+    png = SNAPSHOTS / (stem + '.png')
+    if not cv2.imwrite(str(png), out):
+        raise OSError(f'Could not save {png}')
+    if ev is not None:
+        fix = ev['fix']
+        np.savez_compressed(SNAPSHOTS / (stem + '.npz'), frame=frame, depth_mm=depth,
+                            intrinsics=json.dumps(k), config=json.dumps(cfg),
+                            gcc=loc.gcc(*fix['evidence'][:2]),
+                            direction=fix['direction'], z=fix['z'], coherence=fix['coherence'],
+                            observed_at=ev['observed_at'], snapshot_at=time.monotonic(),
+                            frame_at=time.monotonic() if frame_at is None else frame_at)
+    return png
+
+
 def run(args, cfg):
     import multiprocessing
     from camera import Gemini
 
-    meta = None
-    if args.target:
-        try:
-            meta = Meta()
-        except MetaError as exc:
-            raise SystemExit(f'Meta: {exc}')
-    events = multiprocessing.Queue()
-    multiprocessing.Process(target=listen, args=(events,), daemon=True).start()
-    try:
-        first = events.get(timeout=30)
-    except queue.Empty:
-        raise SystemExit('The microphone listener did not start within 30 s.')
-    if first['kind'] == 'error':
-        raise SystemExit(f"Microphone problem: {first['message']}")
-    cam, loc = Gemini(), Localizer()
-    ui = {'note': 'Listening. c = calibrate, s = snapshot, q = quit', 'last': None}  # last = (time, fix)
-    cal = {'active': False, 'click': None}
+    if cfg['camera']['mount'] != 'base':
+        raise SystemExit('This viewer needs a fixed camera/array. Moving-camera transforms are not implemented here.')
+    meta = Meta() if args.target else None
+    events, stop = multiprocessing.Queue(maxsize=32), multiprocessing.Event()
+    process = multiprocessing.Process(target=listen, args=(events, stop), daemon=True)
+    cam, recorder = None, None
+    ui = {'note': 'Listening. Fixed camera + microphone. Robot control is off.', 'last': None}
+    cal = CalibrationController()
+    shape, click = None, None
+    view, latest, meta_worker, evidence_frame = None, None, None, None
+    heatmap, diagnostics, paused = not args.no_heatmap, args.diagnostics, False
+    pause_time, held = None, None
+    viewport = initial_viewport()
+    displayed_viewport = None
+    displayed = None
 
     def on_mouse(event, x, y, flags, param):
-        if cal['active'] and event == cv2.EVENT_LBUTTONDOWN:
-            cal['click'] = (x, y, time.monotonic())
-            say(ui, f'Calibrating: got your click at ({x}, {y}), listening for the sound...')
+        nonlocal click
+        if cal.active and not paused and shape is not None and event == cv2.EVENT_LBUTTONDOWN:
+            xy = scope_ui.canvas_to_frame(x, y, shape, viewport_size=displayed_viewport)
+            if xy is not None and displayed is not None:
+                # Bind the click to the image/audio the person actually saw,
+                # rather than replacing them with next iteration's sensor data.
+                click = (xy, *displayed, time.monotonic())
 
-    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-    cv2.setMouseCallback(WINDOW, on_mouse)
-    say(ui, ui['note'])
-    writer, view, started = None, None, time.monotonic()
     try:
+        process.start()
+        deadline = time.monotonic() + 25
+        while True:
+            try:
+                first = events.get(timeout=max(.01, deadline - time.monotonic()))
+            except queue.Empty:
+                raise RuntimeError('Microphone did not start within 25 seconds.')
+            if first['kind'] == 'error':
+                raise RuntimeError('Microphone: ' + first['message'])
+            if first['kind'] == 'ready':
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Microphone did not start within 25 seconds.')
+        cam = Gemini()
+        loc = Localizer()
+        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
+        cv2.resizeWindow(WINDOW, *viewport)
+        cv2.setMouseCallback(WINDOW, on_mouse)
+        say(ui, ui['note'])
+        started = last_frame_at = time.monotonic()
+        fps, last_timestamp = None, -float('inf')
+        recorder = TimedRecorder(args.record) if args.record else None
         while not (args.seconds and time.monotonic() - started > args.seconds):
             got = cam.read()
+            reports = list(pending(events))
+            now = time.monotonic()  # includes callbacks posted while draining the queue
+            for report in reports:
+                if report['kind'] == 'error':
+                    raise RuntimeError('Microphone: ' + report['message'])
+                if report['kind'] == 'warning':
+                    say(ui, report['message'])
+            if not process.is_alive():
+                raise RuntimeError('Microphone worker stopped; restart after checking its USB connection.')
             if got is None:
+                if now - last_frame_at > 5:
+                    raise RuntimeError('No camera frames for 5 seconds; check its USB connection.')
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
                 continue
-            frame, depth, k = got
-            for ev in pending(events):
-                final = ev['kind'] == 'sound'
-                view = make_view(ev, final, loc, depth, k, cfg)
-                view['show_reach'] = args.reach
-                ui['last'] = (time.monotonic(), ev['fix'])  # a sound still playing counts too
-                if final or time.monotonic() - ui.get('printed', 0) > 1.0:
-                    print(f"{time.strftime('%H:%M:%S')} {'heard' if final else 'hearing'}: {summary(view)}", flush=True)
-                    ui['printed'] = time.monotonic()
-                if final and meta and ev.get('wav'):
-                    view['verdict'] = None
-                    threading.Thread(target=check_sound, args=(meta, ev['wav'], args.target, view), daemon=True).start()
-            if cal['active'] and cal['click']:
-                calibrate_step(cal, ui, cfg, depth, k)
-            out = draw(frame, view, args.target, ui['note'])
-            if cal['active'] and cal['click']:
-                cv2.drawMarker(out, cal['click'][:2], (0, 255, 255), cv2.MARKER_CROSS, 40, 3)
+            interval = now - last_frame_at
+            if interval > 0:
+                instantaneous = 1 / interval
+                fps = instantaneous if fps is None else .9 * fps + .1 * instantaneous
+            last_frame_at = now
+            if not paused:
+                frame, depth, k = got
+                held = got
+                shape = frame.shape
+                ev = newest_sound(reports, now)
+                if ev is not None and ev['observed_at'] >= last_timestamp:
+                    latest = ev
+                    last_timestamp = ev['observed_at']
+                    final = ev['kind'] == 'sound'
+                    view = make_view(ev, final, loc, depth, k, cfg)
+                    evidence_frame = (frame.copy(), depth.copy(), dict(k), now)
+                    view['show_reach'] = args.reach
+                    if final or now - ui.get('printed', 0) > 1:
+                        print(summary(view), flush=True)
+                        ui['printed'] = now
+                    if (final and meta and ev.get('wav') and view['quality']['state'] != 'weak'
+                            and time.monotonic() - ev['observed_at'] <= MAX_AGE_S
+                            and (meta_worker is None or not meta_worker.is_alive())):
+                        meta_worker = threading.Thread(target=check_sound,
+                                                       args=(meta, ev['wav'], args.target, view), daemon=True)
+                        meta_worker.start()
+            else:
+                frame, depth, k = held
+            now = time.monotonic()  # include scoring work in freshness checks
+            if cal.active and click is not None:
+                xy, clicked_event, clicked_depth, clicked_k, clicked_at = click
+                say(ui, cal.click(xy, clicked_event, clicked_depth, clicked_k, cfg, clicked_at))
+                click = None
+            if displayed_viewport is not None:
+                viewport = window_viewport(viewport)
+            out = draw(frame, view, args.target, ui['note'], now=pause_time if paused else now,
+                       fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
+                       heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
+                       viewport_size=viewport)
             cv2.imshow(WINDOW, out)
-            if args.record:
-                writer = writer or cv2.VideoWriter(args.record, cv2.VideoWriter_fourcc(*'mp4v'), 30,
-                                                   (out.shape[1], out.shape[0]))
-                writer.write(out)
+            displayed_viewport = viewport
+            displayed = (latest, depth, dict(k))
+            if recorder:
+                recorder.write(out, now)
             key = cv2.waitKey(1) & 0xFF
+            if ord('A') <= key <= ord('Z'):
+                key += ord('a') - ord('A')
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
-            if key == ord('c'):
-                cal.update(active=True, click=None)
-                say(ui, 'Calibrating: play the sound from your phone in view, then click on the phone')
-            if key == ord('s'):
-                SNAPSHOTS.mkdir(parents=True, exist_ok=True)
-                path = SNAPSHOTS / time.strftime('%Y%m%d-%H%M%S.png')
-                cv2.imwrite(str(path), out)
-                say(ui, f'Saved {path.name}')
+            if key == ord('c') and not paused:
+                say(ui, cal.start(cfg))
+            elif key == 27:
+                cal.active, click = False, None
+                say(ui, 'Calibration cancelled. Existing settings kept.')
+            elif key in (10, 13) and cal.active and not paused:
+                try:
+                    say(ui, cal.apply(cfg))
+                    view, latest, evidence_frame = None, None, None
+                except (OSError, ValueError) as exc:
+                    say(ui, f'Could not save calibration: {exc}')
+            elif key == ord('h'):
+                heatmap = not heatmap
+            elif key == ord('d'):
+                diagnostics = not diagnostics
+            elif key == ord(' '):
+                paused = not paused
+                pause_time = now if paused else None
+                if not paused:
+                    view, latest, evidence_frame = None, None, None
+            elif key == ord('s'):
+                source, source_depth, source_k, frame_at = evidence_frame or (frame, depth, k, now)
+                path = save_snapshot(out, source, source_depth, source_k, cfg, latest, loc, frame_at=frame_at)
+                say(ui, f'Saved {path.name} and available sensor evidence.')
     finally:
-        cam.close()
-        if writer:
-            writer.release()
-        cv2.destroyAllWindows()
+        stop.set()
+        if process.pid is not None:
+            process.join(timeout=3)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+        for cleanup in (events.close, cam.close if cam is not None else None,
+                        recorder.close if recorder is not None else None, cv2.destroyAllWindows):
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception as exc:
+                    print(f'Cleanup warning: {exc}', flush=True)
 
 
 def main():
@@ -389,7 +598,9 @@ def main():
     p.add_argument('--target', help='also ask Muse Spark whether the sound is this')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
     p.add_argument('--seconds', type=float, help='stop after this long')
-    p.add_argument('--reach', action='store_true', help="also say whether the spot is within the arm's reach")
+    p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
+    p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
+    p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
     p.add_argument('--env-file', help='also load keys from this .env file')
     args = p.parse_args()
     load_env(ENV_FILE)
@@ -399,6 +610,8 @@ def main():
         run(args, aim.load_config())
     except KeyboardInterrupt:
         pass
+    except (RuntimeError, MetaError, OSError) as exc:
+        raise SystemExit(str(exc))
 
 
 if __name__ == '__main__':
