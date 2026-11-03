@@ -4,7 +4,10 @@
   python scope.py --target "keys jingling"   also ask Muse Spark what the sound is
   python scope.py --record demo.mp4          also save the annotated video
 
-Keys in the window: c = calibrate, s = snapshot, q = quit.
+Keys in the window: v = voice command, c = calibrate, s = snapshot, q = quit.
+Voice: press v and say e.g. "find my keys" (holds the first match), "follow the phone ringing",
+"stop", or "show everything". Muse Voice Transcribe writes it down, Muse Spark turns it into what
+to look for, and only sounds Muse Spark confirms from their spectrogram are highlighted.
 Calibrate: press c, play a sound, and click its source in the picture. The board's direction
 (front_yaw_deg in arm_config.toml) is corrected from that.
 
@@ -203,14 +206,58 @@ def save_front_yaw(value):
                                encoding='utf-8')
 
 
-def check_sound(meta, wav, target, view):
-    """Background thread: Muse Spark's verdict on the sound, written into the view."""
+def check_sound(meta, wav, target, view, hunt, ui):
+    """Background thread: Muse Spark's verdict on the sound, written into the view. In find mode the
+    first match is held on screen."""
     try:
         verdict = meta.sound_matches(wav, target)
     except MetaError as exc:
         verdict = {'match': False, 'heard': f'check failed ({exc})', 'confidence': 0.0}
-    view['rejected'] = not (verdict['match'] and verdict['confidence'] >= 0.5)
-    view['verdict'] = verdict
+    match = verdict['match'] and verdict['confidence'] >= 0.5
+    view.update(rejected=not match, verdict=verdict, time=time.monotonic())
+    if match and hunt['mode'] == 'find' and hunt['target'] == target and hunt['found'] is None:
+        view['hold'] = True
+        hunt['found'] = view
+        say(ui, f"Found it ({verdict['heard']}). Press v for a new command.")
+
+
+def handle_voice(meta, wav, ui, hunt):
+    """Background thread: spoken command -> Muse Voice Transcribe -> Muse Spark -> what to look for."""
+    if not wav:
+        say(ui, "Didn't hear a command. Press v, then speak.")
+        return
+    try:
+        text = meta.transcribe(wav).strip()
+        if not text:
+            say(ui, "Didn't catch that. Press v and try again.")
+            return
+        cmd = meta.parse_command(text)
+    except MetaError as exc:
+        say(ui, f'Voice command failed: {exc}')
+        return
+    sound = cmd['sound'].strip() or None
+    if cmd['action'] in ('find', 'follow'):
+        hunt.update(target=sound, mode=cmd['action'], found=None)
+        what = f'looking for "{sound}"' if sound else 'showing every sound'
+    elif cmd['action'] == 'home':
+        hunt.update(target=None, mode='follow', found=None)
+        what = 'showing every sound'
+    elif cmd['action'] == 'stop':
+        hunt.update(target=None, mode='paused', found=None)
+        what = 'paused'
+    else:
+        what = 'not a SoundScope command'
+    say(ui, f'You said "{text}": {what}')
+
+
+def hunt_status(hunt):
+    if hunt['found'] is not None:
+        return f"FOUND: {hunt['target']}"
+    if hunt['mode'] == 'paused':
+        return 'Paused (press v)'
+    if hunt['target']:
+        return f"{'Finding' if hunt['mode'] == 'find' else 'Following'}: {hunt['target']}"
+    return 'Showing every sound'
 
 
 def label(img, text, org, color=(255, 255, 255), scale=0.7):
@@ -244,16 +291,21 @@ def summary(view):
     return f"{dist}, {side(math.degrees(math.atan2(x, z))).replace('°', ' deg')}   {sure}"
 
 
-def draw(frame, view, target, note):
+def draw(frame, view, target, note, status=None):
     out = frame.copy()
     h, w = out.shape[:2]
     label(out, note, (12, h - 16), (200, 255, 200) if note.startswith('Calibrat') else (255, 255, 255), 0.6)
+    if status:
+        (tw, _), _ = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        label(out, status, (w - tw - 16, 32), (0, 220, 255))
     if view is None:
         return out
     age = time.monotonic() - view['time']
-    if view['final'] and age > HOLD_S + FADE_S:
+    # Held: a find-mode match, or Muse Spark still deciding about this sound.
+    held = view.get('hold') or (target and view['final'] and 'verdict' in view and view['verdict'] is None)
+    if view['final'] and not held and age > HOLD_S + FADE_S:
         return out
-    fade = 1.0 if not view['final'] or age <= HOLD_S else 1 - (age - HOLD_S) / FADE_S
+    fade = 1.0 if not view['final'] or held or age <= HOLD_S else 1 - (age - HOLD_S) / FADE_S
     if 'off_screen' in view:
         where, _ = view['off_screen']
         tip = {'right': (w - 30, h // 2), 'left': (30, h // 2), 'above': (w // 2, 30), 'below': (w // 2, h - 50)}[where]
@@ -286,15 +338,19 @@ def draw(frame, view, target, note):
     return out
 
 
-def listen(events):
+def listen(events, requests):
     """Mic listener, run in its own process: the camera SDK holds Python's lock while it waits for
-    frames, which froze a listener thread in the same process completely (measured: 0 frames/s)."""
+    frames, which froze a listener thread in the same process completely (measured: 0 frames/s).
+    Also records spoken commands (from the board's speech channel) when the window asks."""
     from arm_follow import Listener
     listener = Listener(events.put, updates=True)
     listener.start()
     listener.ready.wait()
     events.put({'kind': 'error', 'message': str(listener.error)} if listener.error else {'kind': 'ready'})
-    listener.join()
+    if listener.error:
+        return
+    while True:
+        events.put({'kind': 'voice', 'wav': listener.record_command(requests.get())})
 
 
 def pending(events):
@@ -310,14 +366,14 @@ def run(args, cfg):
     import multiprocessing
     from camera import Gemini
 
-    meta = None
-    if args.target:
-        try:
-            meta = Meta()
-        except MetaError as exc:
+    try:
+        meta = Meta()
+    except MetaError as exc:
+        if args.target:
             raise SystemExit(f'Meta: {exc}')
-    events = multiprocessing.Queue()
-    multiprocessing.Process(target=listen, args=(events,), daemon=True).start()
+        meta = None  # everything works except voice commands and the sound check
+    events, requests = multiprocessing.Queue(), multiprocessing.Queue()
+    multiprocessing.Process(target=listen, args=(events, requests), daemon=True).start()
     try:
         first = events.get(timeout=30)
     except queue.Empty:
@@ -325,8 +381,9 @@ def run(args, cfg):
     if first['kind'] == 'error':
         raise SystemExit(f"Microphone problem: {first['message']}")
     cam, loc = Gemini(), Localizer()
-    ui = {'note': 'Listening. c = calibrate, s = snapshot, q = quit', 'last': None}  # last = (time, fix)
+    ui = {'note': 'Listening. v = voice command, c = calibrate, s = snapshot, q = quit', 'last': None}
     cal = {'active': False, 'click': None}
+    hunt = {'target': args.target, 'mode': 'follow', 'found': None}  # what voice commands asked for
 
     def on_mouse(event, x, y, flags, param):
         if cal['active'] and event == cv2.EVENT_LBUTTONDOWN:
@@ -346,19 +403,27 @@ def run(args, cfg):
                 continue
             frame, depth, k = got
             for ev in pending(events):
+                if ev['kind'] == 'voice':
+                    threading.Thread(target=handle_voice, args=(meta, ev['wav'], ui, hunt), daemon=True).start()
+                    continue
+                ui['last'] = (time.monotonic(), ev['fix'])  # calibration uses sounds, even while paused
+                if hunt['mode'] == 'paused' or hunt['found'] is not None:
+                    continue
                 final = ev['kind'] == 'sound'
                 view = make_view(ev, final, loc, depth, k, cfg)
                 view['show_reach'] = args.reach
-                ui['last'] = (time.monotonic(), ev['fix'])  # a sound still playing counts too
+                if hunt['target']:
+                    view['rejected'] = True  # gray until Muse Spark says it's the right sound
                 if final or time.monotonic() - ui.get('printed', 0) > 1.0:
                     print(f"{time.strftime('%H:%M:%S')} {'heard' if final else 'hearing'}: {summary(view)}", flush=True)
                     ui['printed'] = time.monotonic()
-                if final and meta and ev.get('wav'):
+                if final and hunt['target'] and meta and ev.get('wav'):
                     view['verdict'] = None
-                    threading.Thread(target=check_sound, args=(meta, ev['wav'], args.target, view), daemon=True).start()
+                    threading.Thread(target=check_sound, args=(meta, ev['wav'], hunt['target'], view, hunt, ui),
+                                     daemon=True).start()
             if cal['active'] and cal['click']:
                 calibrate_step(cal, ui, cfg, depth, k)
-            out = draw(frame, view, args.target, ui['note'])
+            out = draw(frame, hunt['found'] or view, hunt['target'], ui['note'], hunt_status(hunt))
             if cal['active'] and cal['click']:
                 cv2.drawMarker(out, cal['click'][:2], (0, 255, 255), cv2.MARKER_CROSS, 40, 3)
             cv2.imshow(WINDOW, out)
@@ -369,6 +434,12 @@ def run(args, cfg):
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
+            if key == ord('v'):
+                if meta is None:
+                    say(ui, 'Voice needs MODEL_API_KEY in meta-soundscope/.env (copy it from Meta_Hack).')
+                else:
+                    requests.put(4.0)
+                    say(ui, 'Listening for your command (4 s), e.g. "find my keys"...')
             if key == ord('c'):
                 cal.update(active=True, click=None)
                 say(ui, 'Calibrating: play the sound from your phone in view, then click on the phone')

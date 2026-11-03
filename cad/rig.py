@@ -1,14 +1,19 @@
 """SoundScope rig: one 3D-printed part holding the Gemini 2 on top and the reSpeaker board under it.
 
   pip install trimesh manifold3d matplotlib
-  python cad/rig.py            writes cad/soundscope_rig.stl and cad/soundscope_rig.png
+  python cad/rig.py            writes soundscope_rig_print.stl (print this one, as-is),
+                               soundscope_rig.stl (as used) and soundscope_rig.png (preview)
 
 In use the board hangs right under the camera's color lens, its LED face flush with the camera's
 front, cable edge pointing DOWN. It is held only by the two small holes on the edge opposite the
 USB port, so the mics (4 spots 3 mm from the rim, on a 66 mm square) and the whole lower half
 stay open on both faces. A 1/4"-20 nut at the back takes a tripod.
 
-Print upside down (camera plate on the bed), no supports. PLA or PETG, 4 walls, 30% infill.
+Print soundscope_rig_print.stl as it comes (camera plate flat on the bed): no supports needed.
+Every overhang is 45 deg or steeper (the board posts sit on 50 deg ramps); the run below checks it.
+A 0.3 mm skin closes the top of the tripod-nut pocket so it bridges cleanly: push the tripod
+screw through it. NJIT Makerspace: PrusaSlicer + Makerspace config bundle, Prusa CORE One, PLA,
+0.2 mm layers, 3 perimeters, 25% infill, supports off.
 Hardware: 2x M3x6 (camera), 2x M2x10 self-tapping (board), 1x 1/4"-20 hex nut (tripod).
 
 Sources: Seeed reSpeaker XVF3800 2D drawing (100 mm disc; holes 42.71 mm apart, 24.5 mm from
@@ -43,7 +48,7 @@ PLATE_BACK = -72.0
 STANDOFF, STANDOFF_LEN = 7.0, 12.0
 FINGER_W, FINGER_T = 9.0, 6.0
 TRIPOD_Y, BOSS_D, BOSS_H = -54.0, 26.0, 8.0
-NUT_AF, NUT_DEPTH = 11.3, 5.8   # 1/4"-20 hex nut (7/16" across flats) + clearance
+NUT_AF, NUT_DEPTH = 11.5, 5.8   # 1/4"-20 hex nut (7/16" = 11.1 mm across flats) + printer shrink
 PILOT_D = 1.8                   # M2 self-tapping; open to 2.2 for M2.5
 
 BOARD_CENTER = np.array([RGB_X, -1.0 - BOARD_T / 2, -PLATE_T - GAP_ABOVE_BOARD - BOARD_R])
@@ -77,11 +82,13 @@ def build():
     holes_z = BOARD_CENTER[2] + HOLE_DY
     solids = [box((-CAM[0] / 2 - 1, PLATE_BACK, -PLATE_T), (CAM[0] / 2 + 1, 0, 0)),
               cylinder((0, TRIPOD_Y, -PLATE_T - BOSS_H / 2), BOSS_D, BOSS_H)]
-    cuts = [cylinder((0, TRIPOD_Y, -PLATE_T - BOSS_H / 2), 6.9, PLATE_T + BOSS_H + 2),
+    hole_top = -NUT_DEPTH - 0.3  # leaves a 0.3 mm skin over the nut pocket (prints as a clean bridge)
+    hole_bottom = -PLATE_T - BOSS_H - 1
+    cuts = [cylinder((0, TRIPOD_Y, (hole_top + hole_bottom) / 2), 7.0, hole_top - hole_bottom),
             cylinder((0, TRIPOD_Y, -NUT_DEPTH / 2 + 0.01), NUT_AF / np.cos(np.pi / 6), NUT_DEPTH, sections=6)]
     for sx in (-1, 1):  # camera screws: slotted through-holes with head counterbores from below
         x = sx * M3_SPACING / 2
-        cuts += [box((x - 1.7, M3_Y - 3, -PLATE_T - 1), (x + 1.7, M3_Y + 3, 1)),
+        cuts += [box((x - 1.75, M3_Y - 3, -PLATE_T - 1), (x + 1.75, M3_Y + 3, 1)),
                  box((x - 3.25, M3_Y - 4.5, -PLATE_T - 1), (x + 3.25, M3_Y + 4.5, -PLATE_T + 2.5))]
     finger_front = back_face - STANDOFF_LEN
     for sx in (-1, 1):  # fingers down to the board's two holes
@@ -91,6 +98,9 @@ def build():
             box((x - STANDOFF / 2, finger_front, holes_z - STANDOFF / 2), (x + STANDOFF / 2, back_face, holes_z + STANDOFF / 2)),
         ]
         solids.append(rib(x - 2.0, x + 2.0, (finger_front - FINGER_T + 0.5, -PLATE_T + 0.5), 14.0, 16.0))
+        # 50 deg ramp above each post (below it when printing upside down), so the post never prints in mid-air
+        solids.append(rib(x - STANDOFF / 2, x + STANDOFF / 2, (finger_front - 0.5, holes_z + STANDOFF / 2 - 0.5),
+                          -(STANDOFF_LEN + 0.5), -(STANDOFF_LEN + 0.5) * np.tan(np.radians(50))))
         cuts.append(cylinder((x, (finger_front - FINGER_T + back_face) / 2, holes_z), PILOT_D,
                              back_face - finger_front + FINGER_T + 2, axis='y', sections=24))
     part = trimesh.boolean.union(solids, engine='manifold')
@@ -126,10 +136,32 @@ def preview(part, path):
     fig.savefig(path, dpi=110, bbox_inches='tight')
 
 
+def for_printing(part):
+    """Upside down (rotated 180 deg about X), camera plate on the bed at z = 0."""
+    printed = part.copy()
+    printed.apply_transform(trimesh.transformations.rotation_matrix(np.pi, (1, 0, 0)))
+    printed.apply_translation((0, 0, -printed.bounds[0][2]))
+    return printed
+
+
+def overhangs(printed, limit_deg=45.0):
+    """Down-facing areas steeper than limit_deg from vertical that are not on the bed: (mm2, centers)."""
+    normals, centers, areas = printed.face_normals, printed.triangles_center, printed.area_faces
+    bad = (normals[:, 2] < -np.sin(np.radians(limit_deg)) - 1e-6) & (centers[:, 2] > 0.3)
+    return float(areas[bad].sum()), centers[bad]
+
+
 if __name__ == '__main__':
     part = build()
     part.export(HERE / 'soundscope_rig.stl')
+    printed = for_printing(part)
+    printed.export(HERE / 'soundscope_rig_print.stl')
     preview(part, HERE / 'soundscope_rig.png')
+    area, where = overhangs(printed)
+    print(f'print file: {printed.bounds[1][2]:.1f} mm tall, plate on the bed; overhangs past 45 deg: {area:.1f} mm2')
+    for z in sorted({round(float(c[2]), 1) for c in where}):
+        near = where[np.abs(where[:, 2] - z) < 0.05]
+        print(f'   at height {z:5.1f} mm: {len(near)} faces around x {near[:, 0].mean():6.1f}, y {near[:, 1].mean():6.1f}')
     ext = part.bounds[1] - part.bounds[0]
     print(f'watertight={part.is_watertight}  size {ext[0]:.0f} x {ext[1]:.0f} x {ext[2]:.0f} mm  '
           f'volume {part.volume / 1000:.1f} cm3 (~{part.volume / 1000 * 1.24:.0f} g PLA solid)')

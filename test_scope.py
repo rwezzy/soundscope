@@ -169,5 +169,86 @@ class CalibrationFlow(unittest.TestCase):
         self.saved.assert_not_called()
 
 
+class VoiceCommands(unittest.TestCase):
+    """What each spoken command does, with a stand-in for the Meta API."""
+
+    def setUp(self):
+        from unittest import mock
+        printer = mock.patch('builtins.print')
+        printer.start()
+        self.addCleanup(printer.stop)
+
+    def fake_meta(self, transcript, action='find', sound='keys', error=None):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from meta_api import MetaError
+        meta = SimpleNamespace(transcribe=mock.Mock(return_value=transcript),
+                               parse_command=mock.Mock(return_value={'action': action, 'sound': sound, 'reply': 'ok'}))
+        if error:
+            meta.transcribe.side_effect = MetaError(error)
+        return meta
+
+    def command(self, *args, hunt=None, wav=b'wav', **kwargs):
+        hunt = hunt or {'target': None, 'mode': 'follow', 'found': None}
+        ui = {'note': ''}
+        scope.handle_voice(self.fake_meta(*args, **kwargs), wav, ui, hunt)
+        return hunt, ui['note']
+
+    def test_find_and_follow_set_the_target(self):
+        hunt, note = self.command('find my keys', 'find', 'keys')
+        self.assertEqual((hunt['target'], hunt['mode']), ('keys', 'find'))
+        self.assertIn('looking for "keys"', note)
+        hunt, _ = self.command('follow the phone', 'follow', 'phone ringing')
+        self.assertEqual((hunt['target'], hunt['mode']), ('phone ringing', 'follow'))
+
+    def test_stop_pauses_and_home_shows_everything(self):
+        busy = {'target': 'keys', 'mode': 'find', 'found': {'view': 1}}
+        hunt, _ = self.command('stop', 'stop', '', hunt=dict(busy))
+        self.assertEqual((hunt['target'], hunt['mode'], hunt['found']), (None, 'paused', None))
+        hunt, _ = self.command('show everything', 'home', '', hunt=dict(busy))
+        self.assertEqual((hunt['target'], hunt['mode']), (None, 'follow'))
+
+    def test_non_commands_and_failures_change_nothing(self):
+        for kwargs, expect in ((dict(transcript="what's the weather", action='ignore', sound=''), 'not a SoundScope'),
+                               (dict(transcript='   '), "Didn't catch"),
+                               (dict(transcript='x', error='HTTP 500'), 'failed'),
+                               (dict(transcript='x', wav=None), "Didn't hear")):
+            with self.subTest(**{k: str(v) for k, v in kwargs.items()}):
+                hunt, note = self.command(**kwargs, hunt={'target': 'keys', 'mode': 'follow', 'found': None})
+                self.assertEqual(hunt['target'], 'keys')
+                self.assertIn(expect, note)
+
+    def test_find_mode_holds_the_first_confirmed_match(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        hunt, ui = {'target': 'keys', 'mode': 'find', 'found': None}, {'note': ''}
+        no = SimpleNamespace(sound_matches=mock.Mock(return_value={'match': False, 'heard': 'speech', 'confidence': 0.9}))
+        other = {'time': 0}
+        scope.check_sound(no, b'wav', 'keys', other, hunt, ui)
+        self.assertTrue(other['rejected'])
+        self.assertIsNone(hunt['found'])
+        yes = SimpleNamespace(sound_matches=mock.Mock(return_value={'match': True, 'heard': 'keys jingling', 'confidence': 0.9}))
+        view = {'time': 0}
+        scope.check_sound(yes, b'wav', 'keys', view, hunt, ui)
+        self.assertIs(hunt['found'], view)
+        self.assertTrue(view['hold'] and not view['rejected'])
+        self.assertEqual(scope.hunt_status(hunt), 'FOUND: keys')
+
+    def test_screen_draws_in_every_state(self):
+        cfg = scope_config()
+        depth, _ = render(cfg)
+        loc, fix = heard_from((RIGHT_BOX[0] + RIGHT_BOX[1]) / 2, cfg)
+        frame = np.zeros((*SHAPE, 3), np.uint8)
+        view = scope.make_view({'fix': fix}, True, loc, depth, K, cfg)
+        for extra in ({}, {'verdict': None, 'rejected': True}, {'hold': True},
+                      {'verdict': {'match': True, 'heard': 'keys', 'confidence': 0.9}, 'rejected': False}):
+            for hunt in ({'target': None, 'mode': 'follow', 'found': None},
+                         {'target': 'keys', 'mode': 'paused', 'found': None}):
+                out = scope.draw(frame, {**view, **extra}, hunt['target'], 'note', scope.hunt_status(hunt))
+                self.assertEqual(out.shape, frame.shape)
+                self.assertGreater(int(out.sum()), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
