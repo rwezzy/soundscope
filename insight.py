@@ -37,6 +37,7 @@ ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.6, 20.0
 # A very clear sound (20 dB or more over the room) alerts with a less sure label: missing an alarm is worse
 # than a false alarm. Live, Nov 4: a +33 dB ring was labeled "phone ringing" at only 0.4.
 ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.4
+META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no Meta label
 PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
                     re.IGNORECASE)
 
@@ -198,8 +199,11 @@ class Enricher(threading.Thread):
         if stale:
             return
 
-        strong = (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or \
-            ((record.get('loudness') or {}).get('snr_db') or 0) >= 6
+        # Worth a Meta label: at least a little above the room, and clearly located or clearly loud.
+        # Live, Nov 4: blips at -2 dB came back as "knock on the door" and only cost credits.
+        snr = (record.get('loudness') or {}).get('snr_db') or 0
+        strong = snr >= META_MIN_SNR_DB and (
+            (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or snr >= 6)
         trusted_local = ((record.get('sound') or {}).get('local_similarity') or 0) >= 0.92
         facts = {k: acoustic.get(k) for k in ('duration_s', 'dominant_hz', 'centroid_hz', 'onsets', 'character')}
         sheet = (self.references.sheet(wav) if wav and self.references is not None and self.references.items

@@ -5,13 +5,15 @@ The story: **sounds you can't hear, made visible.** One idea per shot. Screen-re
 
 ## Before recording (10 min)
 
-- **Lights on**, camera and mic board on a stand (the compact stand: `--mount tripod`; the new
-  size-tolerant v5 stand: `--mount stand_v5`), on a desk or the floor, facing the room. The commands
-  below use `--mount tripod`; swap in your stand's name. New v5 print: test-fit it on your tripod
-  once (heads wider than ~46 mm were not checked against its floor bumps).
+- **Lights on**, camera and mic board in the adjustable ring holder (`--mount carrier_v3`), on a
+  desk or the floor, facing the room. Other stands: `--mount tripod` (compact) or `--mount stand_v5`.
+- Play test sounds from a phone set **away from you** (to one side), not the laptop in front of you:
+  Muse Spark sees a picture of the sound's spot, so it should show the phone, not your face.
+  If people in shot don't want pictures sent, add `--private`.
+- Alerts need a sound clearly louder than the room (about +6 dB): play it loud or close.
   Plug both into the laptop (the camera into a USB 3 port). If SoundScope says "No Orbbec camera
   is plugged in", replug it.
-- Calibrate once: `python scope.py --mount tripod`, press **C**, clap left / center / right and click
+- Calibrate once: `python scope.py --mount carrier_v3`, press **C**, clap left / center / right and click
   each spot while it sounds, **Enter**. Quit with **Q**.
 - Optional, makes alerts instant and free: `python soundscope.py enroll "doorbell"` (play your doorbell
   or a doorbell sound after each Enter). Same for "smoke alarm".
@@ -23,7 +25,7 @@ The story: **sounds you can't hear, made visible.** One idea per shot. Screen-re
 | # | Time | Do | Say (or caption) | Screen shows |
 |---|---|---|---|---|
 | 1 | 0:00-0:15 | The rig, then the viewer | "If you can't hear a sound, you also can't tell where it came from. SoundScope shows you." | The stand, the dashboard |
-| 2 | 0:15-0:35 | `python scope.py --mount tripod --assist --name Keith`. Clap on the left, then the right. | "Four microphones find the direction with physics, not a model; the depth camera shows the spot." | Heat map jumps to each clap, distance in meters |
+| 2 | 0:15-0:35 | `python scope.py --mount carrier_v3 --assist --name Keith`. Clap on the left, then the right. | "Four microphones find the direction with physics, not a model; the depth camera shows the spot." | Heat map jumps to each clap, distance in meters |
 | 3 | 0:35-0:55 | Play a smoke alarm sound from a phone on one side of the room. | "Muse Spark recognizes it from its spectrogram and SoundScope says where it is." | Red banner **ALERT: smoke alarm (to the left)**, beep |
 | 4 | 0:55-1:20 | Someone says "Keith, dinner's ready" from the other side. | "Muse Voice Transcribe writes it down; the mics say who and where. Your name raises an alert." | Caption at the talker, **ALERT: Speaker 1 said "Keith" (to the right)** |
 | 5 | 1:20-1:40 | A phone rings on the table. | "Muse Spark looks at the sound and at the spot the mics picked, before and after; SAM 3.1 outlines the object." | "phone ringing: a phone (sound + sight agree)", outline around the phone |
@@ -36,7 +38,7 @@ The story: **sounds you can't hear, made visible.** One idea per shot. Screen-re
 
 - Nothing appears when you clap: clap louder or closer. A fan or heater switching on is absorbed as
   background within ~3 s.
-- Labels arrive a few seconds late: Muse Spark takes 3-8 s per sound. Pause between sounds.
+- Labels arrive 5-15 s after a sound (Muse Spark checks three at once, newest first). Pause between sounds.
 - "Meta features paused": the daily budget is used up; raise `META_DAILY_LIMIT_USD` in `.env`.
 - No camera at hand: `python soundscope.py listen --assist --name Keith` does alerts and captions
   with the mics alone (terminal output, no picture).

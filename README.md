@@ -12,7 +12,7 @@ model) and a depth camera shows **the spot**. Meta's models add **what it was**,
 It is a sound-awareness aid, not a medical device.
 
 ```
-python scope.py --assist --name Keith
+python scope.py --mount carrier_v3 --assist --name Keith
 ```
 
 | You get | How |
@@ -33,6 +33,7 @@ SoundScope does not need the robot or a particular mount. Each setup is just a g
 
 | Setup | Run |
 |---|---|
+| **Current rig:** camera on its tripod, board in the adjustable ring carrier v3 (printed screws; fits boards 96-102 mm and cameras ~88-91 mm wide; designed in the parallel SoundScope build, print files not in this repo yet) | `python scope.py --mount carrier_v3 --assist` |
 | Camera on its tripod, board on the printed compact stand (on a desk, shelf or the floor) | `python scope.py --mount tripod --assist` |
 | Size-tolerant printed stand (`cad/v5_stand/`) or the v3 stand (`cad/v3/`) | `--mount stand_v5` / `--mount stand_v3` |
 | **No camera at all**: just the mic board, anywhere | `python soundscope.py listen --assist --name Keith` |
@@ -63,8 +64,9 @@ Without `--assist`/`--meta`, nothing is sent unless you press **V**.
 
 ```
 pip install -r requirements.txt
-python scope.py --mount tripod --assist --name Keith   # sound awareness, everything on
-python scope.py --mount tripod                         # live view + local memory, no Meta requests
+python scope.py --mount carrier_v3 --assist --name Keith   # sound awareness, everything on
+python scope.py --mount carrier_v3 --assist --private     # same, but no pictures leave the computer
+python scope.py --mount carrier_v3                        # live view + local memory, no Meta requests
 python scope.py --watch "dog barking" --meta           # add your own alerts
 python soundscope.py enroll "doorbell"                 # record your doorbell: free, instant label
 python soundscope.py search "did the doorbell ring?"   # ask the memory
@@ -72,7 +74,7 @@ python soundscope.py digest --minutes 60               # what happened while you
 python soundscope.py map                               # where every sound came from
 python soundscope.py listen --assist                   # mics only, no camera
 python soundscope.py budget                            # today's Meta spend
-python -m unittest discover                            # 174 offline tests, no hardware or network
+python -m unittest discover                            # 182 offline tests, no hardware or network
 ```
 
 Meta features need `MODEL_API_KEY` in `meta-soundscope/.env` (or `--env-file path/to/.env`).
@@ -91,7 +93,10 @@ A search also marks on the picture where the matching sounds happened.
   becomes background within ~3 s instead of swallowing later sounds; any sound that never stops is
   reported every 8 s. Tuned on real recordings with a loud vent.
 - **What:** free local measurements first (loudness over the room, length, pitch, bursts, speech
-  likelihood, nearest of your examples); Muse Spark only for clear sounds, rate-limited, one at a time.
+  likelihood, nearest of your examples); Muse Spark only for sounds at least +3 dB over the room,
+  three at a time, newest first, rate-limited.
+- **Alerts:** only when worth interrupting: at least +6 dB over the room and a label at least 60% sure
+  (40% at +20 dB or louder, so a loud alarm is not missed); the same alert at most every 20 s.
 - **Memory:** each clearly located sound becomes a record (`recordings/memory/*.jsonl`, local,
   git-ignored): when, where, how loud, what, who said what, the object at the spot, alerts.
 
@@ -108,7 +113,14 @@ A search also marks on the picture where the matching sounds happened.
 - Wrist mode (dry run): a knock 38° left → the arm would turn J1 0° → 30° → 38°.
 - Limits: spectrogram labels can be wrong ("dog bark" for a noise burst), so uncertain ones say
   "probably"; laptop speech across a room loses words; depth gives the visible surface along the
-  direction, not proof of the source. Captions were tested with computer voices, not people.
+  direction, not proof of the source. Captions were tested mostly with computer voices.
+
+**Ring holder, assist mode (Nov 4, live):**
+- A person saying "Hi, my name is Keith" → `ALERT: Speaker 2 said "Keith" (slightly left)`.
+- Smoke alarm → `ALERT: smoke alarm (straight ahead)`; knock → `ALERT: knock on the door`.
+- A faint doorbell (+5 dB) was labeled "Doorbell" without an alert; faint blips no longer raise
+  false knocks.
+- Results arrived about 6-13 s after each sound (10-44 s before, with one worker).
 
 ## Files
 
@@ -123,7 +135,7 @@ A search also marks on the picture where the matching sounds happened.
 | `camera.py` | Orbbec Gemini 2 color + aligned depth |
 | `calibration.py`, `localization_quality.py` | Multi-position yaw fit; weak/ambiguous/candidate labels |
 | `arm_follow.py`, `aim.py`, `arm_config.toml` | Optional arm: safety gate, base and wrist modes, Viam |
-| `profiles/` | Setup geometry: tripod (compact stand), stand_v3, stand_v5, wrist_v4 |
+| `profiles/` | Setup geometry: carrier_v3 (ring holder), tripod (compact stand), stand_v3, stand_v5, wrist_v4 |
 | `cad/` | Printed mounts: `v3/`, `v4/` (wrist), `v5_stand/` (size-tolerant stand) |
 | `test_*.py`, `test_data/` | Offline tests; real array clips (text-to-speech and test tones) |
 | `ARM_SETUP.md`, `DEMO.md` | Arm setup; demo-video shot list |
@@ -131,6 +143,12 @@ A search also marks on the picture where the matching sounds happened.
 ## Privacy and safety
 
 Recordings, the sound memory, your examples and the Meta usage log stay on this computer and are
-git-ignored. Captions run only with `--assist`, `--meta` or `--captions`. Object checks are not sent
-for speech (the crop would show the person talking). The arm is dry-run by default, moves slowly
-within fixed limits, and only after `live = true` and typing MOVE.
+git-ignored. Captions run only with `--assist`, `--meta` or `--captions`.
+
+- Pictures are never sent for speech-like sounds, and people are never outlined.
+- Faces in any picture that is sent are blurred first. This is best effort: OpenCV's face finder
+  can miss an angled or dim face, so a picture of the sound's spot can still show a person.
+- `--private` sends no pictures at all (labels and captions only).
+
+The arm is dry-run by default, moves slowly within fixed limits, and only after `live = true` and
+typing MOVE.

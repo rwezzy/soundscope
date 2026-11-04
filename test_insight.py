@@ -76,6 +76,9 @@ class Worker(unittest.TestCase):
         t['record']['where']['quality'] = 'weak'
         e.process(t)
         self.meta.classify_sound.assert_not_called()
+        e.process(self.task(clicks(), snr=-2.0, crop_jpeg=b'c'))  # well located but under the room: no label
+        self.meta.classify_sound.assert_not_called()
+        self.meta.source_check.assert_not_called()
 
     def test_speech_gets_captions_named_by_direction(self):
         e = self.enricher()
