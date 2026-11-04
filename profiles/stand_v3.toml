@@ -1,0 +1,20 @@
+# Standing mount v3 (cad/v3/PRINT_stand.stl): the camera stays screwed to its own tripod, the printed
+# collar slides over it from behind, and the mic board stands above it (LED side forward, USB up).
+#   python scope.py --mount stand_v3
+# Numbers from cad/mount_v3.py (board centre from the camera's color lens). Laid over arm_config.toml;
+# safety settings stay there.
+
+[camera]
+mount = "base"
+
+[camera.base]
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0                  # tilt the tripod down? put the angle here (- = down)
+
+[array]
+mount = "facing"               # board standing, LED side toward the scene
+cable_edge = "up"              # USB edge up (cable goes straight up, clear of everything)
+position_mm = [0, -11, 82.3]   # [forward, left, up] from the color lens: centred on the camera,
+                               # which puts it 11 mm to the right of the lens (lens is 11 mm left of centre)
+front_yaw_deg = 0              # press C in scope.py to calibrate; it is saved here

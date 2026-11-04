@@ -1,0 +1,31 @@
+# Wrist mount v3 (cad/v3/PRINT_wrist_collar_only.stl + the stand's board frame, clips and pins): the
+# collar clamps around the Lite 6 gripper body with two M6 screws, the camera looks where the suction
+# cup looks, and the board sits on the far side of the camera. Camera and mics move together, so the
+# viewer works in the camera's own frame and the arm servos on the camera view (no calibration):
+#   python scope.py --mount wrist_v3
+#   python arm_follow.py --mount wrist_v3 listen      (dry run unless --live)
+# Board position relative to the camera is the same as on the stand (same collar and frame).
+
+[camera]
+mount = "arm"
+
+[camera.base]                  # camera-relative frame for the viewer (the camera is the origin)
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0
+
+[camera.arm]                   # lens from the flange for Viam's frame system: the lens is 58.5 mm off the
+offset_mm = [58.5, 0, 20]      # gripper axis; measure the distance along the axis with the mount on
+lens_direction = [0, 0, 1]
+roll_deg = 0
+
+[array]
+mount = "facing"
+on_arm = true
+cable_edge = "up"              # USB edge points away from the gripper = "up" in the picture
+position_mm = [0, -11, 82.3]
+front_yaw_deg = 0              # press C in scope.py --mount wrist_v3 to calibrate; it is saved here
+
+[aim]
+wrist_yaw_sign = -1            # flip to 1 if a dry run turns away from the sound
+wrist_pitch_sign = 1
