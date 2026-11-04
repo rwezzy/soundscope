@@ -7,7 +7,8 @@ The story: **sounds you can't hear, made visible.** One idea per shot. Screen-re
 
 - **Lights on**, camera and mic board on a stand (the compact stand: `--mount tripod`; the new
   size-tolerant v5 stand: `--mount stand_v5`), on a desk or the floor, facing the room. The commands
-  below use `--mount tripod`; swap in your stand's name.
+  below use `--mount tripod`; swap in your stand's name. New v5 print: test-fit it on your tripod
+  once (heads wider than ~46 mm were not checked against its floor bumps).
   Plug both into the laptop (the camera into a USB 3 port). If SoundScope says "No Orbbec camera
   is plugged in", replug it.
 - Calibrate once: `python scope.py --mount tripod`, press **C**, clap left / center / right and click
