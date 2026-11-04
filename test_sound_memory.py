@@ -60,6 +60,11 @@ class Profiles(unittest.TestCase):
         self.assertGreater(p_voice['speech_score'], p_tone['speech_score'])
         self.assertGreater(p_voice['speech_score'], p_noise['speech_score'])
 
+    def test_dual_tone_ring_names_both_pitches(self):
+        t = np.arange(int(16000 * 2.0)) / 16000
+        ring = (np.sin(2 * np.pi * 1400 * t) + np.sin(2 * np.pi * 1800 * t)) * (np.sin(2 * np.pi * 20 * t) > 0)
+        self.assertIn('tonal around 1.4 kHz and 1.8 kHz', sm.acoustic_profile(0.2 * ring)['character'])
+
     def test_words(self):
         self.assertEqual(sm.loudness_words(3), 'faint')
         self.assertEqual(sm.loudness_words(30), 'loud')

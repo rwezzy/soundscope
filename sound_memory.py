@@ -105,7 +105,12 @@ def acoustic_profile(x, fs=FS):
     voice_band = float(p[(f >= 300) & (f <= 3400)].sum() / p.sum())
     low_band = float(p[f <= 1000].sum() / p.sum())
     near = np.abs(f - dominant) <= max(15.0, 0.03 * dominant)
-    tone_share = float(p[near].sum() / p.sum())  # Nov 4, real array: alarms 0.98, voices 0.16-0.27, knocks 0.1
+    rest = np.where(np.abs(f - dominant) <= max(30.0, 0.06 * dominant), 0.0, p)
+    second = float(f[int(np.argmax(rest))])                  # dual-tone ringtones have two pitches
+    near2 = np.abs(f - second) <= max(15.0, 0.03 * second)
+    share1, share2 = float(p[near].sum() / p.sum()), float(p[near2].sum() / p.sum())
+    tone_share = share1 + (share2 if share2 >= 0.25 * share1 else 0.0)
+    # Nov 4, real array: alarms 0.98, voices 0.16-0.27, knocks 0.1
     peak_share = float(p.max() / p.sum())  # one steady tone owns its bin; voices and noise spread out
 
     # Onsets: rises of the 10 ms envelope above half the loudest level (and well above the room),
@@ -144,6 +149,7 @@ def acoustic_profile(x, fs=FS):
                'crest_db': round(db(peak) - db(rms_loud), 1), 'centroid_hz': round(centroid), 'dominant_hz': round(dominant),
                'flatness': round(flatness, 3), 'onsets': int(onsets), 'attack_ms': round(attack_ms),
                'voice_band': round(voice_band, 2), 'tone_share': round(tone_share, 3),
+               'second_hz': round(second) if share2 >= 0.25 * share1 else None,
                'speech_score': round(float(speech), 2)}
     profile['contrast_db'] = round(db(loudest) - db(max(quiet, 1e-12)), 1) if 0 < quiet < loudest * 0.3 else None
     profile['character'] = character(profile)
@@ -174,7 +180,8 @@ def character(p):
     elif p['duration_s'] >= 1.0:
         words.append('sustained')
     if p.get('tone_share', 0) >= 0.5 and p['dominant_hz'] >= 200:
-        words.append(f"tonal around {_khz(p['dominant_hz'])}")
+        pitches = sorted(f for f in (p['dominant_hz'], p.get('second_hz')) if f)
+        words.append('tonal around ' + ' and '.join(_khz(f) for f in pitches))
     elif p['flatness'] > 0.45:
         words.append('noisy, broadband')
     elif p['centroid_hz'] > 3500:
@@ -212,17 +219,17 @@ def direction_words(azimuth_deg, elevation_deg=None):
 # ---------------------------------------------------------------------------------------------
 # Records
 
-MIN_Z, MIN_SNR_DB = 10.0, 0.0  # a memory record needs a well-located sound above the room's level
+MIN_Z, MIN_SNR_DB, SURE_Z = 10.0, 0.0, 20.0
 
 
 def worth_remembering(fix):
-    """Well located (z) AND above the room's average level (SNR): keep. Measured Nov 4 on the real
-    array: laptop-speaker bursts, a ring, speech and claps had z 55-89 at +2.6..+14 dB, while the
-    quiet room's own blips had z under 7 or SNR below 0 dB."""
+    """Clearly located (z >= 20), or located (z >= 10) and above the room's average level. Measured
+    Nov 4 on the real array: laptop-speaker bursts, a ring, speech and claps had z 55-89 at +2.6..+14 dB
+    in a quiet room and z 22-27 just under the level of a loud vent; the room's own blips had z 4-7."""
     z = float(fix.get('z') or 0.0)
     snr = fix.get('snr_db')
     snr = float(snr) if snr is not None and math.isfinite(float(snr)) else -99.0
-    return z >= MIN_Z and snr >= MIN_SNR_DB
+    return z >= SURE_Z or (z >= MIN_Z and snr >= MIN_SNR_DB)
 
 
 def new_id(now=None):

@@ -148,7 +148,7 @@ class Tracker:
     """Streaming detector: follows the room's noise floor, spots sounds, and localizes each one."""
 
     def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15,
-                 min_window_s=3.0, min_bias=2.0, min_smooth=0.9):
+                 min_window_s=3.0, min_bias=1.1, min_smooth=0.9):
         fps = FS / HOP
         self.loc = loc
         self.threshold = 10 ** (threshold_db / 10)
@@ -161,9 +161,11 @@ class Tracker:
         self.quiet = self.gap
         self.past = None                            # echo memory for Localizer.weights
         self.recent = deque(maxlen=4)               # onset frames from before detection fired
-        # Minimum statistics: per-bin minimum of smoothed power, per 0.5 s segment, over min_window_s.
-        # The minimum of a noisy estimate sits well under its mean; min_bias brings it back (tuned on
-        # test_doa_noise: a heater switching on is one ~3.6 s sound, then claps come out on target).
+        # Minimum statistics: per-bin 20th percentile of smoothed power for each 0.5 s segment, lowest
+        # of the segments in min_window_s, times min_bias. Tuned on test_doa_noise (a heater switching
+        # on becomes one ~3.7 s sound, then claps come out on target, at 10 and 16 dB) and on a real
+        # recording with a steady vent (Nov 4), where it leaves every clap's SNR exactly as before;
+        # a plain minimum x2 set the floor above a steady vent and pushed real claps under it.
         self.segment = max(1, int(0.5 * fps))
         self.minima = deque(maxlen=max(2, int(min_window_s / 0.5)))
         self.min_bias, self.min_smooth = min_bias, min_smooth
@@ -234,11 +236,13 @@ class Tracker:
         """Raise the floor to the quietest level of the last few seconds, when that is higher."""
         a = self.min_smooth
         self.smooth = P.copy() if self.smooth is None else a * self.smooth + (1 - a) * P
-        self.seg_min = self.smooth.copy() if self.seg_min is None else np.minimum(self.seg_min, self.smooth)
+        if self.seg_min is None:
+            self.seg_min = []
+        self.seg_min.append(self.smooth.copy())
         self.seg_count += 1
         if self.seg_count < self.segment:
             return
-        self.minima.append(self.seg_min)
+        self.minima.append(np.percentile(np.stack(self.seg_min), 20, axis=0))
         self.seg_min, self.seg_count = None, 0
         if len(self.minima) == self.minima.maxlen:
             floor = np.min(np.stack(self.minima), axis=0) * self.min_bias
