@@ -38,6 +38,7 @@ pip install -r requirements.txt
 python scope.py --mount tripod                 # live view, sound memory on, no Meta requests
 python scope.py --mount tripod --meta          # + labels, captions, object check, outlines
 python scope.py --mount wrist --meta           # camera + mics clamped on the arm's gripper
+python scope.py --meta --watch "phone ringing" # alert when that sound happens
 python soundscope.py search "when did the phone ring?"
 python soundscope.py digest --minutes 30       # Muse Spark summarizes what happened
 python soundscope.py map                       # picture: where every sound came from
@@ -45,7 +46,7 @@ python soundscope.py enroll "phone ringing"    # record your own example (free l
 python soundscope.py listen --meta             # mics only, no camera
 python soundscope.py budget                    # today's estimated Meta spend
 python arm_follow.py listen --mount wrist      # arm turns toward sounds (dry run unless --live)
-python -m unittest discover                    # 166 offline tests, no hardware or network
+python -m unittest discover                    # 171 offline tests, no hardware or network
 ```
 
 Meta features need `MODEL_API_KEY` in `meta-soundscope/.env` (or `--env-file path/to/.env`).
@@ -88,9 +89,16 @@ turn limits stay in `arm_config.toml`. Calibration (C) saves into the active pro
 ## Measured on the real hardware (Nov 4, laptop speaker ~1.7 m to the camera's left)
 
 - Separate sounds stay separate: 3 noise bursts → 3 records; a ring → 1 record ("tonal around
-  1.8 kHz"); a spoken sentence → 2 speech records with captions; 2 claps → "two clicks" at +2 dB.
+  1.4 and 1.8 kHz"); a spoken sentence → 2 speech records with captions; 2 claps → "two clicks".
 - All placed 37–42° left at 1.7 m, consistently; earlier mic trial: 5.4° mean error at 1 m.
-- The room's own faint blips (z < 7 or below the room's average level) are not saved.
+- Voice commands through the board's speech channel: "find my keys", "when did the phone ring",
+  "tell me when the kettle whistles" transcribed word for word and mapped to find / search / watch.
+- Your own examples: after 2 takes each, a smoke alarm and a knock were labeled correctly, for free,
+  and `--watch "smoke alarm"` raised the alert.
+- Two problems found live and fixed: a heater/vent switching on after start-up merged every later
+  sound into one (now absorbed within ~3 s, tuned on a real vent recording), and the room's own
+  faint blips were saved (now only clearly located sounds are).
+- Wrist mode, dry run on the real mics: a knock 38° left → J1 0° → 30° → 38°.
 - Limits: labels from spectrograms can be wrong ("dog bark" for a noise burst), which is why they
   say "probably" below 0.75 confidence; transcription of laptop speech across a room drops words;
   depth gives the visible surface along the direction, not proof of the source.
@@ -111,7 +119,9 @@ turn limits stay in `arm_config.toml`. Calibration (C) saves into the active pro
 | `profiles/` | Mount geometry: tripod, wrist |
 | `cad/` | Printed mounts (`rig.py`, `rig_v2.py`, `wrist_mount.py` and their STLs) |
 | `test_*.py` | Offline tests |
-| `ARM_SETUP.md` | Arm, Viam and offset setup |
+| `ARM_SETUP.md` | Arm, Viam, offsets and the wrist mount |
+| `DEMO.md` | Shot list for the demo video |
+| `test_data/` | Real array clips (text-to-speech and test tones) for regression tests |
 
 ## Privacy
 

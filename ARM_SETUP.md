@@ -78,8 +78,29 @@ Base frame: origin = base center at table level; **+X = where the arm reaches at
 ## Base frame check
 If the first live turn stops with "J1 swung the arm the opposite way": make sure the arm's Viam frame has no rotation and the 3D scene shows the arm reaching along +X at J1 = 0.
 
+## Wrist mount (camera + mics on the gripper)
+Print `cad/wrist_mount.stl` (one part, no supports, about 1 h). It clamps around the 77.5 mm
+gripper body with one spare M6x10 screw; camera and board both look where the suction cup looks.
+1. Slide the ring onto the gripper, tighten the screw until snug (it cuts its own thread in PLA).
+2. Camera in the sleeve, lenses toward the cup, **tripod-thread side facing away from the gripper**.
+3. Board edge-first into the C-groove, LED face toward the cup, USB edge outward.
+4. Dry run, arm off: `python arm_follow.py --mount wrist simulate 25 -40` should print J1 going
+   **down** for a sound on the right (`25`) and **up** for one on the left (`-40`).
+5. Real mics, still a dry run: `python arm_follow.py --mount wrist listen`. Clap to one side; the
+   printed J1 change should turn the camera toward the clap. If it turns away, set
+   `wrist_yaw_sign = 1` in `profiles/wrist.toml`.
+6. Only then, with the E-stop in hand: `live = true` in `arm_config.toml` and `--live` (type MOVE).
+
+How it aims: the mics ride with the camera, so each sound's angle off the camera's center is all it
+needs (J1 += sign x angle, J5 too with `use_pitch`). No camera-to-arm calibration, no assumed
+distance. Every move still goes through the same speed, step and turn-window limits.
+Tested Nov 4 on the real array (dry run): a knock 38° left of center → J1 0° → 30° → 38°.
+The camera's depth starts at 20 cm, so objects right at the suction cup have no depth; finding and
+facing sounds works, grasping does not (see below).
+
 ## Not built yet
 - **Grasping:** the code only reports "within reach". Reaching needs the mounted camera + depth (Viam motion service with obstacles).
-- **Distance:** `assumed_distance_mm` until Gemini 2 depth is wired in.
+- **Distance (base-mounted camera):** `assumed_distance_mm` until Gemini 2 depth is wired into the arm
+  app. The wrist mode does not need a distance.
 
 Sources: [Viam UFactory module](https://github.com/viam-modules/viam-ufactory-xarm), [Viam arm + camera frames](https://docs.viam.com/motion-planning/frame-system/arm-gripper-camera/), [Lite 6 specs](https://docs.lite6.ufactory.cc/9.technical_specifications.html)
