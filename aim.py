@@ -4,12 +4,14 @@ Frames: the arm base frame is UFACTORY's and Viam's "world": origin at the base 
 table, +X where the arm reaches at J1 = 0, +Y to its left, +Z up. Millimeters and degrees.
 """
 import math
+import os
 import tomllib
 from pathlib import Path
 
 import numpy as np
 
 CONFIG_FILE = Path(__file__).with_name('arm_config.toml')
+PROFILES_DIR = Path(__file__).with_name('profiles')
 
 # Lite 6 joint ranges (UFACTORY Lite6 hardware manual). We stay LIMIT_MARGIN inside them.
 JOINT_LIMITS = [(-360, 360), (-150, 150), (-3.5, 300), (-360, 360), (-124, 124), (-360, 360)]
@@ -19,9 +21,37 @@ CAPS = {'speed_deg_s': 30, 'accel_deg_s2': 200, 'max_step_deg': 45,
         'yaw_window_deg': 170, 'pitch_window_deg': 30}
 
 
-def load_config(path=CONFIG_FILE):
+def profiles():
+    """Names of the mount profiles in profiles/ (tripod, wrist, ...)."""
+    return {p.stem for p in PROFILES_DIR.glob('*.toml')}
+
+
+def _merge(base, extra):
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def load_config(path=CONFIG_FILE, profile=None):
+    """arm_config.toml, with a mount profile (profiles/<name>.toml) laid over it when one is chosen
+    by `profile` or the SOUNDSCOPE_MOUNT environment variable. Safety settings stay in arm_config."""
     with open(path, 'rb') as f:
         cfg = tomllib.load(f)
+    name = profile if profile is not None else os.environ.get('SOUNDSCOPE_MOUNT', '').strip()
+    if name:
+        file = PROFILES_DIR / f'{name}.toml'
+        if not file.exists():
+            raise SystemExit(f'Unknown mount "{name}". Choose one of: {", ".join(sorted(profiles()))}.')
+        with open(file, 'rb') as f:
+            extra = tomllib.load(f)
+        if 'safety' in extra:
+            raise SystemExit(f'{file.name}: safety settings belong in arm_config.toml only.')
+        _merge(cfg, extra)
+        cfg['profile'] = {'name': name, 'path': str(file),
+                          'has_yaw': 'front_yaw_deg' in extra.get('array', {})}
     s = cfg['safety']
     for key in ('speed_deg_s', 'accel_deg_s2', 'max_step_deg'):
         if not 0 < s[key] <= CAPS[key]:
@@ -130,6 +160,28 @@ def camera_axes(yaw_deg, pitch_deg):
     lens = np.array([math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), math.sin(p)])
     right = np.array([math.sin(y), -math.cos(y), 0.0])
     return right, np.cross(lens, right), lens
+
+
+def array_to_camera(direction, cfg):
+    """An array-frame direction in the camera's frame (x right, y down, z out of the lens)."""
+    d = array_axes(cfg) @ np.asarray(direction, float)
+    c = cfg['camera']['base']
+    return np.array([d @ axis for axis in camera_axes(c['yaw_deg'], c['pitch_deg'])])
+
+
+def camera_to_array(direction_cam, cfg):
+    """Inverse of array_to_camera: a camera-frame direction in the array's own frame."""
+    c = cfg['camera']['base']
+    right, down, lens = camera_axes(c['yaw_deg'], c['pitch_deg'])
+    d = np.asarray(direction_cam, float)
+    return array_axes(cfg).T @ (d[0] * right + d[1] * down + d[2] * lens)
+
+
+def wrist_errors(direction, cfg):
+    """(yaw, pitch) in degrees between a wrist camera's lens axis and the sound: yaw + = the sound
+    is right of center, pitch + = above. The mics ride on the same mount, so no arm pose is needed."""
+    x, y, z = array_to_camera(direction, cfg)
+    return math.degrees(math.atan2(x, z)), math.degrees(math.atan2(-y, math.hypot(x, z)))
 
 
 def camera_to_base(point, cfg):

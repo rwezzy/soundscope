@@ -7,7 +7,11 @@ SRP-PHAT (steered response power with phase transform), tuned for faint and far 
   sound always arrives before its echoes (this is what keeps distant sounds on target);
 - evidence is summed over frames, so a quiet sound gets sharper the longer it plays;
 - the live tracker keeps the few frames from just before a sound is detected, since
-  that first arrival carries the cleanest direction.
+  that first arrival carries the cleanest direction;
+- the tracker's noise floor also follows "minimum statistics": if even the quietest moments of
+  the last few seconds got louder (a heater or fan switching on after calibration), that is new
+  background and the floor rises at once, instead of one endless "sound" swallowing every real one.
+  Claps, rings and speech all have gaps, so their quiet moments keep the floor where it was.
 """
 from collections import deque
 
@@ -143,7 +147,8 @@ class Localizer:
 class Tracker:
     """Streaming detector: follows the room's noise floor, spots sounds, and localizes each one."""
 
-    def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15):
+    def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15,
+                 min_window_s=3.0, min_bias=2.0, min_smooth=0.9):
         fps = FS / HOP
         self.loc = loc
         self.threshold = 10 ** (threshold_db / 10)
@@ -156,6 +161,13 @@ class Tracker:
         self.quiet = self.gap
         self.past = None                            # echo memory for Localizer.weights
         self.recent = deque(maxlen=4)               # onset frames from before detection fired
+        # Minimum statistics: per-bin minimum of smoothed power, per 0.5 s segment, over min_window_s.
+        # The minimum of a noisy estimate sits well under its mean; min_bias brings it back (tuned on
+        # test_doa_noise: a heater switching on is one ~3.6 s sound, then claps come out on target).
+        self.segment = max(1, int(0.5 * fps))
+        self.minima = deque(maxlen=max(2, int(min_window_s / 0.5)))
+        self.min_bias, self.min_smooth = min_bias, min_smooth
+        self.smooth, self.seg_min, self.seg_count = None, None, 0
         self._new_event()
 
     def _new_event(self):
@@ -215,4 +227,19 @@ class Tracker:
             loc.noise = np.where(P > loc.noise, loc.noise * self.creep, loc.noise + self.follow * (P - loc.noise))
         else:
             loc.noise = loc.noise + self.follow * (P - loc.noise)
+        self._minimum_statistics(P)
         return out
+
+    def _minimum_statistics(self, P):
+        """Raise the floor to the quietest level of the last few seconds, when that is higher."""
+        a = self.min_smooth
+        self.smooth = P.copy() if self.smooth is None else a * self.smooth + (1 - a) * P
+        self.seg_min = self.smooth.copy() if self.seg_min is None else np.minimum(self.seg_min, self.smooth)
+        self.seg_count += 1
+        if self.seg_count < self.segment:
+            return
+        self.minima.append(self.seg_min)
+        self.seg_min, self.seg_count = None, 0
+        if len(self.minima) == self.minima.maxlen:
+            floor = np.min(np.stack(self.minima), axis=0) * self.min_bias
+            self.loc.noise = np.maximum(self.loc.noise, floor)

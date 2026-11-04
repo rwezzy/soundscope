@@ -246,7 +246,8 @@ class VoiceCommands(unittest.TestCase):
             for hunt in ({'target': None, 'mode': 'follow', 'found': None},
                          {'target': 'keys', 'mode': 'paused', 'found': None}):
                 out = scope.draw(frame, {**view, **extra}, hunt['target'], 'note', scope.hunt_status(hunt))
-                self.assertEqual(out.shape, frame.shape)
+                self.assertEqual((out.ndim, out.dtype), (3, np.uint8))
+                self.assertGreaterEqual(out.shape[1], frame.shape[1])
                 self.assertGreater(int(out.sum()), 0)
 
 

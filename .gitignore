@@ -3,3 +3,6 @@ recordings/
 __pycache__/
 # API keys
 .env
+# Your own example sounds (enroll) can capture voices and rooms too.
+references/
+*.toml.tmp

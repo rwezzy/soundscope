@@ -1,0 +1,33 @@
+# Wrist mount: camera and mic board clamped onto the Lite 6 gripper (cad/wrist_mount.stl), both
+# looking where the suction cup looks. They move together, so the viewer works in the camera's own
+# frame and needs no arm pose at all:
+#   python scope.py --mount wrist                  view only; the arm can stay off
+#   python arm_follow.py listen --mount wrist      turn toward sounds (dry run unless --live)
+# Insert the camera with its tripod-thread side facing AWAY from the gripper; then the board sits
+# "above" the picture. Laid over arm_config.toml; safety settings stay there.
+
+[camera]
+mount = "arm"
+
+[camera.base]                  # camera-relative frame for the viewer (the camera is the origin)
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0
+
+[camera.arm]                   # lens from the flange, for Viam's frame system; measure with the mount on
+offset_mm = [58, 0, 20]
+lens_direction = [0, 0, 1]
+roll_deg = 0
+
+[array]
+mount = "facing"               # board faces the scene, like the camera
+on_arm = true                  # the board rides on the wrist with the camera
+cable_edge = "up"              # USB edge points away from the gripper = "up" in the picture
+# Board center from the color lens [forward, left, up] (cad/wrist_mount.py prints it): 153 mm away
+# along the picture's vertical axis, level with the lens.
+position_mm = [0, 0, 153]
+front_yaw_deg = 0              # press C in scope.py --mount wrist to calibrate; it is saved here
+
+[aim]
+wrist_yaw_sign = -1            # J1 change per degree the sound is right of center; flip if a dry run turns away
+wrist_pitch_sign = 1           # same for J5 (only with use_pitch = true)

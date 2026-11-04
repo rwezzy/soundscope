@@ -1,0 +1,21 @@
+# Tripod / desk mount: the camera stands on its own tripod with the mic board on a printed mount
+# (Meta_Hack compact_shared_mount, or cad/soundscope_rig_v2.stl). No arm needed.
+#   python scope.py --mount tripod
+# Laid over arm_config.toml; safety settings stay there. The camera is the origin here, so every
+# position is measured from the camera's color lens: [forward, left, up] in mm.
+
+[camera]
+mount = "base"
+
+[camera.base]
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0                  # tilt the tripod down? put the angle here (- = down)
+
+[array]
+mount = "facing"               # board standing, LED side toward the scene
+cable_edge = "up"              # USB cable edge pointing up
+# compact_shared_mount: board center 72.5 mm above the color lens and 11 mm to the camera's right.
+# rig v2 (cad/soundscope_rig_v2.stl): use [-1, 0, 66.8] instead.
+position_mm = [0, -11, 72.5]
+front_yaw_deg = 0              # press C in scope.py to calibrate; it is saved here

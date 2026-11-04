@@ -22,6 +22,12 @@ min_confidence_z = 12          # only turn for "solid" sound fixes (z, as mic_te
 min_snr_db = -20               # faint is fine as long as z is high
 mute_after_move_s = 0.8        # ignore sounds right after a move (motor noise)
 
+[listen]
+# dB over the room's noise floor that counts as a sound. 0.5 hears very faint sounds but, in a room
+# with a fan or other steady noise, keeps triggering and runs separate sounds together; 1.5 keeps
+# claps, rings and speech while ignoring that background flicker (measured Nov 4).
+threshold_db = 1.5
+
 [aim]
 assumed_distance_mm = 1000     # used until the depth camera supplies the real distance
 use_pitch = false              # also tilt with J5; the flat mic array's up/down is weak, so off
