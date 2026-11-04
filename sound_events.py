@@ -96,7 +96,7 @@ def describe_event(event):
         fragments.append(f'recorded level {level:.1f} dBFS (uncalibrated)')
     snr = _number(event.get('snr_db'))
     if snr is not None:
-        fragments.append(f'{snr:+.1f} dB above estimated background')
+        fragments.append(f'estimated signal-to-background ratio {snr:+.1f} dB')
     nearby = _nearby(event)
     if nearby:
         fragments.append('nearby visible objects: ' + ', '.join(nearby[:5]))

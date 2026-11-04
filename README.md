@@ -30,6 +30,10 @@ mount is required to preserve the camera/microphone relationship when moving
 them together. Wrist mode currently supplies relative geometry, a motion veto
 and guarded robot-coordinate **previews**, not automatic pickup.
 
+Recent hardware and model checks are documented in [VALIDATION.md](VALIDATION.md).
+For a two-minute passive sensor/dashboard check with no Meta calls or robot
+connection, close other viewers and run `python live_check.py --seconds 120`.
+
 ## Run the viewer
 
 Close other SoundScope instances and Orbbec Viewer first so only one program

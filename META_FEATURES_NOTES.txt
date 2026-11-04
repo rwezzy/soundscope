@@ -1,9 +1,12 @@
 SoundScope optional Meta features
 
 Implementation checked against official documentation on 2026-11-04.
-No paid API request was used to develop or test this adapter. Passing offline
-tests establishes budgets, parsing and integration behavior, not model accuracy
-or access for a particular account.
+Initial development used mocked responses. On 2026-11-04, three live requests
+verified generated speech transcription, search interpretation and point-prompt
+segmentation of a generated shape. No room audio or camera images were uploaded.
+Passing these checks establishes account access and integration behavior, not
+real-room speech accuracy, sound classification or emitting-object identity.
+See VALIDATION.md for timings and limits.
 
 Models and responsibilities
 * muse-voice-transcribe-1.0: an explicit short spoken command -> text.

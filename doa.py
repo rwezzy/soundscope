@@ -141,10 +141,19 @@ class Localizer:
 
 
 class Tracker:
-    """Streaming detector: follows the room's noise floor, spots sounds, and localizes each one."""
+    """Streaming detector with bounded final segments and recent final evidence.
 
-    def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15):
+    Running estimates retain the original exponential decay. Completed estimates
+    use at most final_window_s of STFT support, so a moving sound's old path is
+    not reported as its final position. Continuous sound emits an end report
+    every max_segment_s without pretending that the sound became quiet.
+    """
+
+    def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15,
+                 max_segment_s=3.0, final_window_s=1.0):
         fps = FS / HOP
+        if max_segment_s < 3 * HOP / FS or final_window_s < N_FFT / FS:
+            raise ValueError('segment/window too short for acoustic evidence')
         self.loc = loc
         self.threshold = 10 ** (threshold_db / 10)
         self.decay = np.exp(-1 / (memory_s * fps))
@@ -156,33 +165,68 @@ class Tracker:
         self.quiet = self.gap
         self.past = None                            # echo memory for Localizer.weights
         self.recent = deque(maxlen=4)               # onset frames from before detection fired
+        self.max_segment_frames = max(3, int(max_segment_s * fps))
+        # Full STFT support, including its extra overlapping hop, fits this window.
+        self.final_window_frames = max(1, int((final_window_s * FS - N_FFT) // HOP) + 1)
+        self.frame_index = 0
         self._new_event()
 
     def _new_event(self):
         shape = (len(self.loc.pairs), N_FFT // 2 + 1)
         self.run = [np.zeros(shape, complex), np.zeros(shape[1]), np.zeros(shape[1])]
-        self.event = [np.zeros(shape, complex), np.zeros(shape[1]), np.zeros(shape[1])]
         self.frames = 0
-        self.ratios = []
+        self._new_segment()
 
-    def _add(self, X, w):
+    def _new_segment(self):
+        shape = (len(self.loc.pairs), N_FFT // 2 + 1)
+        self.event = [np.zeros(shape, complex), np.zeros(shape[1]), np.zeros(shape[1])]
+        self.window = deque()
+        self.ratios = deque(maxlen=self.final_window_frames)
+        self.segment_start = None
+        self.segment_frames = 0
+
+    def _add(self, X, w, index, ratio):
         new = self.loc.evidence(X[None], w)
+        if self.segment_start is None:
+            self.segment_start = index
         for run, event, n in zip(self.run, self.event, new):
             run *= self.decay
             run += n
             event += n
+        self.window.append((index, new, ratio))
+        while self.window and index - self.window[0][0] >= self.final_window_frames:
+            _, old, _ = self.window.popleft()
+            for event, n in zip(self.event, old):
+                event -= n
+        self.ratios.append(ratio)
         self.frames += 1
+        self.segment_frames += 1
 
-    def _result(self, acc):
+    def _result(self, acc, final_reason=None):
+        if final_reason:
+            # Re-sum the bounded window at segment boundaries. Subtraction of
+            # expired evidence can otherwise leave tiny floating-point residue
+            # after all genuine energy has disappeared.
+            acc = [sum((entry[1][i] for entry in self.window), np.zeros_like(a))
+                   for i, a in enumerate(acc)]
         r = self.loc.peak(*acc)
         if r:
-            r['seconds'] = self.frames * HOP / FS
-            r['snr_db'] = snr_db(np.mean(self.ratios))
+            r['seconds'] = ((self.window[-1][0] - self.segment_start + 1) * HOP / FS
+                            if self.window else 0.)
+            ratios = [entry[2] for entry in self.window] if final_reason else self.ratios
+            r['snr_db'] = snr_db(np.mean(ratios))
             r['evidence'] = tuple(a.copy() for a in acc)  # lets callers score any 3D point (srp_points)
+            if final_reason:
+                r['final_reason'] = final_reason
+                r['segment_seconds'] = r['seconds']
+                r['evidence_start_sample'] = max(0, self.window[0][0] * HOP - N_FFT)
+                r['evidence_end_sample'] = self.window[-1][0] * HOP
+                r['evidence_seconds'] = (r['evidence_end_sample'] - r['evidence_start_sample']) / FS
         return r
 
     def push(self, X):
         """Feed one frame's spectrum (mics, bins). Returns None, ('update', result) or ('end', result)."""
+        self.frame_index += 1
         loc = self.loc
         P = loc.power(X)
         if loc.noise is None:
@@ -198,18 +242,21 @@ class Tracker:
         if active:
             if self.quiet >= self.gap:  # a new sound: start fresh, keeping its onset
                 self._new_event()
-                for Xr, wr in self.recent:
-                    self._add(Xr, wr)
+                for Xr, wr, index, rr in self.recent:
+                    self._add(Xr, wr, index, rr)
             self.quiet = 0
-            self._add(X, w)
-            self.ratios.append(ratio)
-            if self.frames >= 3 and self.frames % self.update_every == 0:
+            self._add(X, w, self.frame_index, ratio)
+            if self.frame_index - self.segment_start + 1 >= self.max_segment_frames:
+                out = ('end', self._result(self.event, 'segment_limit'))
+                self._new_segment()  # running heatmap and echo memory continue unchanged
+            elif self.frames >= 3 and self.frames % self.update_every == 0:
                 out = ('update', self._result(self.run))
         else:
             self.quiet += 1
-            if self.quiet == self.gap and self.frames >= 3:
-                out = ('end', self._result(self.event))
-        self.recent.append((X, w))
+            if self.quiet == self.gap and self.segment_frames >= 3:
+                out = ('end', self._result(self.event, 'quiet'))
+                self._new_segment()
+        self.recent.append((X, w, self.frame_index, ratio))
 
         if active:
             loc.noise = np.where(P > loc.noise, loc.noise * self.creep, loc.noise + self.follow * (P - loc.noise))

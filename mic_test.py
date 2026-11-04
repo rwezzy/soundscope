@@ -70,21 +70,48 @@ def describe(r):
 
 def find_array():
     apis = sd.query_hostapis()
-    found = [(i, d, apis[d['hostapi']]['name']) for i, d in enumerate(sd.query_devices())
+    devices = list(sd.query_devices())
+    found = [(i, d, apis[d['hostapi']]['name']) for i, d in enumerate(devices)
              if 'respeaker' in d['name'].lower() and d['max_input_channels'] > 0]
-    if not found:
-        raise SystemExit('No reSpeaker input found. Is the array plugged into the USB-C port next to the 3.5 mm jack?')
     rank = {api: k for k, api in enumerate(API_ORDER)}
+    rejected = []
     for i, d, api in sorted(found, key=lambda f: rank.get(f[2], len(API_ORDER))):
         if d['max_input_channels'] >= CHANNELS:
             try:
                 sd.check_input_settings(device=i, channels=CHANNELS, samplerate=FS, dtype='int32')
                 return i
-            except sd.PortAudioError:
+            except sd.PortAudioError as exc:
+                detail = ' '.join(str(exc).split())[:180] or 'PortAudio rejected the capture settings'
+                rejected.append(f'  [{i}] {api}: {detail}')
                 continue
-    most = max(d['max_input_channels'] for _, d, _ in found)
-    raise SystemExit(f'The reSpeaker only offers {most} input channels at {FS} Hz, so it is on the stock '
-                     '2-channel firmware. Flash the 16k6ch firmware (see the top of this file).')
+    # PortAudio's view depends on the host API, driver and process permissions.
+    # A two-channel WASAPI endpoint does not establish the installed firmware.
+    inventory = []
+    for api_index, api in enumerate(apis):
+        visible = [d for d in devices if d['hostapi'] == api_index]
+        inputs = [d for d in visible if d['max_input_channels'] > 0]
+        array_channels = sorted({int(d['max_input_channels']) for d in inputs
+                                 if 'respeaker' in d['name'].lower()})
+        channels = ', '.join(map(str, array_channels)) if array_channels else 'none'
+        inventory.append(f"  {api['name']}: {len(visible)} devices, {len(inputs)} inputs; "
+                         f'reSpeaker input channels: {channels}')
+    if not found:
+        reason = 'No reSpeaker input is visible to this process.'
+    elif rejected:
+        reason = (f'Six-channel reSpeaker inputs are visible, but none accepted {CHANNELS}-channel '
+                  f'{FS} Hz int32 capture settings.\nRejected settings:\n' + '\n'.join(rejected))
+    else:
+        most = max(d['max_input_channels'] for _, d, _ in found)
+        reason = (f'No {CHANNELS}-channel reSpeaker input is exposed to this process; '
+                  f'the largest visible reSpeaker input has {most} channels.')
+    raise SystemExit(reason + '\nHost API discovery:\n' +
+                     ('\n'.join(inventory) if inventory else '  No host APIs were reported.') +
+                     '\nFirmware version is unknown from this check; do not flash based on channel count alone. '
+                     'Retry `python mic_test.py devices` using the same Python in a normal, unrestricted '
+                     'Windows Terminal or PowerShell session. Windows WDM-KS is preferred for raw multichannel '
+                     'capture; WASAPI/MME may expose only a processed two-channel endpoint. '
+                     'If capture remains unavailable, close other audio apps and check the USB data connection '
+                     '(the array USB-C port next to the 3.5 mm jack), driver and host-API availability.')
 
 
 def raw_channels():

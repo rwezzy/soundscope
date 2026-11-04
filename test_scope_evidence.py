@@ -1,7 +1,11 @@
 """Regression checks for actual score selection and saved diagnostic evidence."""
 import json
+from contextlib import ExitStack
 from pathlib import Path
+import queue
 import tempfile
+import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -13,6 +17,69 @@ from test_scope import K, RIGHT_BOX, heard_from, render, scope_config
 
 
 class Evidence(unittest.TestCase):
+    def test_camera_timeout_does_not_drop_drained_completed_report(self):
+        reports=queue.Queue();reports.close=mock.Mock()
+        reports.put({'kind':'ready'})
+        event={'kind':'sound','observed_at':time.monotonic(),'fix':{'z':20,'coherence':.3}}
+        reports.put(event)
+        process=mock.Mock(pid=123);process.is_alive.side_effect=[True,False]
+        camera=mock.Mock();camera.read.return_value=None
+        bridge=mock.Mock();bridge.accept_event.return_value=True
+        args=SimpleNamespace(target=None,no_heatmap=False,diagnostics=False,record=None,seconds=None,reach=False)
+        with ExitStack() as patches:
+            patches.enter_context(mock.patch('multiprocessing.Queue',return_value=reports))
+            patches.enter_context(mock.patch('multiprocessing.Event',return_value=mock.Mock()))
+            patches.enter_context(mock.patch('multiprocessing.Process',return_value=process))
+            patches.enter_context(mock.patch('camera.Gemini',return_value=camera))
+            patches.enter_context(mock.patch.object(scope,'Localizer',return_value=mock.Mock()))
+            for name in ('namedWindow','resizeWindow','setMouseCallback','destroyAllWindows'):
+                patches.enter_context(mock.patch.object(scope.cv2,name))
+            patches.enter_context(mock.patch.object(scope.cv2,'waitKey',return_value=ord('q')))
+            patches.enter_context(mock.patch('builtins.print'))
+            scope.run(args,{'camera':{'mount':'base'}},bridge=bridge)
+        bridge.observe.assert_called_once()
+        self.assertIs(bridge.observe.call_args.args[0],event)
+        self.assertIsNone(bridge.observe.call_args.args[2])
+        camera.close.assert_called_once()
+
+    def test_completed_sound_uses_matching_buffer_not_newest_frame(self):
+        bridge=mock.Mock();bridge.accept_event.return_value=True
+        event={'kind':'sound','observed_at':10.,'fix':{'z':20,'coherence':.3}}
+        source=np.zeros((12,16,3),np.uint8);depth=np.ones((12,16))
+        newest=np.ones_like(source)
+        history=[(10.04,source,depth,K),(10.5,newest,depth,K)]
+        view={'quality':{'state':'candidate'}}
+        with mock.patch.object(scope,'make_view',return_value=view) as build:
+            scope.retain_completed([event],history,bridge,10.6,None,{},None)
+        build.assert_called_once()
+        self.assertIs(build.call_args.args[3],depth)
+        self.assertIs(bridge.observe.call_args.args[2],source)
+        self.assertEqual(bridge.observe.call_args.kwargs['frame_at'],10.04)
+
+    def test_completed_sound_survives_missing_or_stale_frame_as_audio_only(self):
+        event={'kind':'sound','observed_at':10.,'fix':{'z':20,'coherence':.3}}
+        frame=np.zeros((12,16,3),np.uint8);depth=np.ones((12,16))
+        for history,now,reason in [([],10.6,'No RGB-D'),([(10.3,frame,depth,K)],10.6,'300 ms'),
+                                   ([(10.,frame,depth,K)],12.,'after capture')]:
+            with self.subTest(reason=reason):
+                bridge=mock.Mock();bridge.accept_event.return_value=True
+                with mock.patch.object(scope,'make_view') as build:
+                    scope.retain_completed([event],history,bridge,now,None,{},None)
+                build.assert_not_called();bridge.observe.assert_called_once()
+                self.assertIsNone(bridge.observe.call_args.args[2])
+                self.assertFalse(bridge.observe.call_args.args[1]['measured'])
+                self.assertIn(reason,bridge.observe.call_args.kwargs['pairing_reason'])
+
+    def test_retention_respects_wrist_gate_and_invalid_capture_times(self):
+        bridge=mock.Mock();bridge.accept_event.return_value=False
+        event={'kind':'sound','observed_at':10.,'fix':{}}
+        scope.retain_completed([event],[],bridge,10.5,None,{},None)
+        bridge.observe.assert_not_called()
+        bridge.accept_event.return_value=True
+        for stamp in (float('nan'),float('inf'),11.,None):
+            scope.retain_completed([dict(event,observed_at=stamp)],[],bridge,10.5,None,{},None)
+        bridge.observe.assert_not_called()
+
     def test_nearer_surface_cannot_override_better_acoustic_score(self):
         scores = np.array([[0.98, 1.0]])
         points = np.array([[[0, 0, .2], [0, 0, 2.0]]])

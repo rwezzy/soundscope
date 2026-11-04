@@ -109,7 +109,7 @@ class Studio:
     def accept_event(self, ev):
         return self.mode != 'wrist' or (self.stable and ev.get('onset_at', -math.inf) >= self.motion.unstable_at + self.motion.settle_s)
 
-    def observe(self, ev, view, frame, now, cfg, rig, frame_at=None):
+    def observe(self, ev, view, frame, now, cfg, rig, frame_at=None, pairing_reason=None):
         ident = f'{self.session}-{ev.get("event_id", ev["observed_at"])}'
         with self.lock:
             if ident in self.seen:
@@ -118,7 +118,10 @@ class Studio:
             if len(self.seen) > 1000:
                 self.seen = {ident}
         direction = np.asarray(rig.array_direction_to_camera(ev['fix']['direction']), float)
-        point = view.get('point') if view.get('measured') and view['quality']['state'] != 'weak' else None
+        has_frame = frame is not None
+        point = view.get('point') if has_frame and view.get('measured') and view['quality']['state'] != 'weak' else None
+        if not has_frame:
+            frame_at = None
         timestamp = datetime.fromtimestamp(time.time()-(now-ev['observed_at']), timezone.utc).isoformat()
         event = dict(id=ident, timestamp=timestamp, mode='wrist' if self.mode == 'wrist' else 'standalone',
             label='unidentified sound', label_source='unknown', acoustic_description=waveform_description(ev.get('wav')),
@@ -127,17 +130,30 @@ class Studio:
             range_m=float(np.linalg.norm(point)) if point is not None else None,
             point_camera_m=np.asarray(point).tolist() if point is not None else None,
             pixel=list(view['spot']) if view.get('spot') is not None and point is not None else None,
-            image_size=[frame.shape[1],frame.shape[0]], snr_db=ev['fix'].get('snr_db'),
+            image_size=[frame.shape[1],frame.shape[0]] if has_frame else None, snr_db=ev['fix'].get('snr_db'),
             level_dbfs=ev.get('level_dbfs'), duration_s=ev['fix'].get('seconds'),
             nearby=[], source_verified=False, observed_at=ev['observed_at'],
             frame_offset_s=None if frame_at is None else frame_at-ev['observed_at'],
             measurement_frame_at=frame_at,
-            media_sync='nearest RGB-D delivery timestamp; not hardware synchronized',
+            pairing_status='paired' if has_frame else 'audio_only',
+            pairing_reason=pairing_reason or ('RGB-D frame supplied; not hardware synchronized.' if has_frame else 'No matched RGB-D frame.'),
+            media_sync='nearest RGB-D delivery timestamp; not hardware synchronized' if has_frame else 'audio only; no matched RGB-D frame',
             coordinates='camera at observation time; not a tracked world location')
+        # Preserve the capture windows used by the listener; camera association
+        # remains at observed_at and does not turn an audio interval into a point.
+        for key in ('onset_at', 'evidence_started_at', 'evidence_ended_at',
+                    'audio_started_at', 'audio_ended_at', 'segment_seconds'):
+            value = ev.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(value):event[key] = value
+        if ev.get('final_reason') in ('quiet', 'segment_limit'):
+            event['final_reason'] = ev['final_reason']
         self.store.add(event)
-        ok,jpg=cv2.imencode('.jpg',frame,[cv2.IMWRITE_JPEG_QUALITY,85])
+        jpg_bytes = None
+        if has_frame:
+            ok,jpg=cv2.imencode('.jpg',frame,[cv2.IMWRITE_JPEG_QUALITY,85])
+            if ok:jpg_bytes=jpg.tobytes()
         with self.lock:
-            self.media[ident]={'wav':ev.get('wav'), 'jpeg':jpg.tobytes() if ok else None}
+            self.media[ident]={'wav':ev.get('wav'), 'jpeg':jpg_bytes}
             while len(self.media)>20:
                 self.media.popitem(last=False)
 
@@ -156,7 +172,9 @@ class Studio:
             result = dict(mode=self.mode, demo=self.demo, stable=self.stable, paused=self.paused,
                 frame_age_s=None if self.frame_at is None else round(time.monotonic()-self.frame_at,2),
                 jobs=[dict(job) for job in list(self.jobs.values())[-6:]], token=self.token,
-                robot='Preview only; no robot connection or motion', media_ids=list(self.media))
+                robot='Preview only; no robot connection or motion', media_ids=list(self.media),
+                media_available={ident:{'audio':bool(media.get('wav')),'image':bool(media.get('jpeg'))}
+                                 for ident,media in self.media.items()})
         # Never hold the frame/media lock while querying another subsystem.
         result['meta'] = self.meta.status()
         return result
@@ -171,6 +189,14 @@ class Studio:
                 raise ValueError('A Meta request is already running; wait for its result.')
             if action in ('sound','context','segment') and event_id not in self.media:
                 raise ValueError('The original event media expired from RAM. Select a newer event.')
+            if action == 'sound' and not self.media[event_id].get('wav'):
+                raise ValueError('No retained audio clip is available for this event.')
+            if action in ('context','segment') and not self.media[event_id].get('jpeg'):
+                raise ValueError('No matched camera snapshot is available for this event; only audio was retained.')
+            if action == 'segment':
+                event = self.store.get(event_id)
+                if not event or event.get('pixel') is None:
+                    raise ValueError('No valid acoustic/depth candidate to segment.')
             ident=uuid.uuid4().hex[:12]
             self.jobs[ident]=dict(id=ident,action=action,state='queued')
             self.queue.put_nowait((ident,action,event_id,text,wav))

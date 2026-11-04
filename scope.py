@@ -397,6 +397,45 @@ def newest_sound(reports, now, max_age=MAX_AGE_S):
     return max(usable, key=lambda ev: (ev['observed_at'], ev['kind'] == 'sound'), default=None)
 
 
+def retain_completed(reports, frame_history, bridge, now, loc, cfg, rig):
+    """Keep completed sounds even when a camera read times out.
+
+    History may outlive the live-overlay freshness window. A missing or stale
+    RGB-D match retains only acoustic evidence, never a guessed image or range.
+    This consumes the bounded report batch immediately; it never waits for USB.
+    """
+    for report in reports:
+        if report.get('kind') != 'sound' or not bridge.accept_event(report):
+            continue
+        observed = report.get('observed_at')
+        if not isinstance(observed, (int, float)) or not math.isfinite(observed) or observed > now:
+            continue
+        age = now - observed
+        source = min(frame_history, key=lambda entry: abs(entry[0]-observed), default=None)
+        if age > MAX_AGE_S:
+            reason = f'Completed sound arrived {age:.2f} s after capture; no fresh RGB-D association.'
+        elif source is None:
+            reason = 'No RGB-D frame was buffered for this sound.'
+        elif abs(source[0]-observed) > .15:
+            reason = f'Closest RGB-D frame was {abs(source[0]-observed)*1000:.0f} ms away; maximum is 150 ms.'
+        else:
+            source_at, frame, depth, k = source
+            view = make_view(report, True, loc, depth, k, cfg, rig=rig)
+            bridge.observe(report, view, frame, now, cfg, rig, frame_at=source_at,
+                           pairing_reason='RGB-D delivery timestamp matched within 150 ms; not hardware synchronized.')
+            continue
+        fix = report['fix']
+        try:
+            z, coherence = float(fix.get('z', 0)), float(fix.get('coherence', 0))
+            strong = math.isfinite(z) and math.isfinite(coherence) and z >= 12 and coherence >= .1
+        except (TypeError, ValueError, OverflowError):
+            strong = False
+        view = {'quality': {'state': 'ambiguous' if strong else 'weak',
+                            'reason': 'Acoustic direction only; no matched camera evidence.'},
+                'measured': False}
+        bridge.observe(report, view, None, now, cfg, rig, pairing_reason=reason)
+
+
 class TimedRecorder:
     """Resample display frames to 15 fps using elapsed time, without speeding up video."""
     def __init__(self, path, fps=15, factory=cv2.VideoWriter):
@@ -522,6 +561,8 @@ def run(args, cfg, bridge=None, rig=None):
             if not process.is_alive():
                 raise RuntimeError('Microphone worker stopped; restart after checking its USB connection.')
             if got is None:
+                if bridge is not None and not paused:
+                    retain_completed(reports, frame_history, bridge, now, loc, cfg, rig)
                 if now - last_frame_at > 5:
                     raise RuntimeError('No camera frames for 5 seconds; check its USB connection.')
                 if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -561,12 +602,7 @@ def run(args, cfg, bridge=None, rig=None):
                 if bridge is not None and stable:
                     # Preserve completed events even when a newer running estimate
                     # wins the viewer queue. Do not reuse its acoustic coordinates.
-                    for report in reports:
-                        if report.get('kind') == 'sound' and bridge.accept_event(report) and 0 <= now-report.get('observed_at', -1e9) <= MAX_AGE_S:
-                            source_at,source_frame,source_depth,source_k = min(frame_history,key=lambda entry:abs(entry[0]-report['observed_at']))
-                            if abs(source_at-report['observed_at']) <= .15:
-                                event_view = make_view(report, True, loc, source_depth, source_k, cfg, rig=rig)
-                                bridge.observe(report, event_view, source_frame, now, cfg, rig, frame_at=source_at)
+                    retain_completed(reports, frame_history, bridge, now, loc, cfg, rig)
             else:
                 frame, depth, k = held
             now = time.monotonic()  # include scoring work in freshness checks

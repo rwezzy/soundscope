@@ -30,9 +30,10 @@ python studio.py --live
 4. Use the OpenCV window's **C** calibration workflow if the physical sensor
    positions still match `arm_config.toml`. Three left/centre/right samples are
    required; Enter saves a valid fit. This estimates yaw only.
-5. Make a sound, then leave a quiet gap so the event completes. Inspect it in the
-   browser. If it is weak, lacks valid depth, or cannot be paired with a recent
-   frame, the application must not invent a precise location.
+5. Make a sound and inspect it in the browser. Short sounds finish after a quiet
+   gap; continuous sounds produce bounded segments about every three seconds.
+   If an event cannot be paired with a recent camera frame, its audio/direction
+   still enters history, with no invented snapshot, distance or 3D point.
 
 The current default config assumes the array is upright, USB edge up, with its
 centre 80 mm below the camera. **The printed holder may change this.** Measure
@@ -43,6 +44,8 @@ The browser uses letterboxing to preserve the camera image's aspect ratio.
 The original OpenCV keys, evidence snapshots and optional recording remain
 available. Close the OpenCV window or press Q to stop the live server; Ctrl+C
 also stops it. Only one instance should use the devices at a time.
+If the server stops, the browser labels the feed **DISCONNECTED**, keeps the
+last good image frozen and disables model actions.
 
 ## Search and descriptions
 
@@ -80,6 +83,12 @@ With the existing key in `.env`, enable a small manual allowance:
 python studio.py --live --enable-meta --meta-max-calls 5
 ```
 
+If the key is in the parent workspace's `.env`, use an explicit path instead:
+
+```powershell
+python studio.py --live --enable-meta --meta-max-calls 5 --env-file ..\.env
+```
+
 | Button | Model | Purpose and limit |
 |---|---|---|
 | Speak a search | Muse Voice Transcribe | Records five seconds from the browser-selected microphone, transcribes once, then searches locally |
@@ -96,8 +105,11 @@ same data directory. Text responses are capped at 1200 tokens. These limits coun
 requests; they cannot guarantee a dollar amount or inspect the account balance.
 
 The API adapters were checked against official Meta documentation and tested
-with mocked responses. Account access, real model output quality and speech
-accuracy still need a small live test. No contributor model is selected. See
+with mocked responses. Three live requests on 2026-11-04 also verified generated
+speech transcription, search interpretation and point-prompt segmentation of a
+generated shape. No sensor media was uploaded in that check. This verifies access
+and integration, not real-room sound recognition or source identification.
+No contributor model is selected. See
 [META_FEATURES_NOTES.txt](META_FEATURES_NOTES.txt) for documented sources and
 implementation limits. The older separate `arm_follow.py` application does not
 inherit Studio's credit controls.
@@ -170,6 +182,12 @@ frame buffer. The recorded timing is camera delivery time, not hardware trigger
 synchronization. It is appropriate to evaluate stationary observations; it does
 not validate localization during robot movement.
 
+For long sounds, each completed segment uses approximately the last one second
+of acoustic evidence and the matching audio interval, ending at the last active
+sample. It does not average an indefinitely moving source over its entire history.
+The event records these intervals and whether a quiet gap or segment limit ended
+it. Audio-only events disable nearby-object and segmentation actions.
+
 `calibrate_rig.py --help` provides an offline fixed-camera-to-base fit from paired
 3D points, with held-out validation. It does not measure a wrist hand-eye transform
 and never enables live motion automatically.
@@ -195,7 +213,30 @@ The integrated offline suite can be run without devices or paid calls:
 python -m unittest test_scope_runtime test_scope_ui test_scope_evidence test_listener_runtime test_calibration test_scope test_localization_quality test_sound_events test_semantic_meta test_rig_geometry test_studio_geometry test_calibrate_rig test_studio test_pose_export -q
 ```
 
+Run all regression tests, including continuous-sound and missing-frame cases:
+
+```powershell
+python -m unittest discover -q
+```
+
+A bounded passive check exercises the real sensors, event history and HTTP
+dashboard without playback, Meta requests or a robot connection:
+
+```powershell
+python live_check.py --seconds 120
+```
+
+Close other sensor viewers first. The check opens the OpenCV viewer and stops
+automatically. Reports under `studio_data/hardware_checks/` contain timings and
+counters, not recordings. Unknown ambient sounds cannot establish accuracy.
+On Windows, a restricted process may see only the two-channel microphone while
+the ordinary desktop Python process sees all six channels through WDM-KS.
+`python mic_test.py devices` reports what that process can actually access;
+two-channel visibility alone is not evidence of incorrect firmware.
+
 These checks cover existing localization/viewer behavior, event history/search,
 budget and cache enforcement, parsing, geometry, stale-pose rejection, and the
 local HTTP application. They do not establish real-room accuracy or successful
 physical pickup.
+
+See [VALIDATION.md](VALIDATION.md) for measured results and outstanding checks.

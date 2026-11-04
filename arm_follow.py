@@ -85,7 +85,9 @@ class Listener(threading.Thread):
     """Bounded mic worker. Sound times are monotonic capture times, never queue-arrival times.
 
     ``event_id`` is stable across a sound's updates/end. ``observed_at`` is the last
-    tracker-active frame's capture time; a quiet tail never refreshes it. Diagnostics
+    tracker-active frame's capture time; a quiet tail never refreshes it. Final
+    evidence/audio windows end at that frame and cover at most roughly one second.
+    Continuous sounds complete bounded segments without waiting for silence. Diagnostics
     have kind ``warning``/``error`` and a message, without a sound ``fix``.
     """
 
@@ -201,6 +203,7 @@ class Listener(threading.Thread):
             frame, pending = np.zeros((N_FFT, len(self.chans))), np.zeros((0, len(self.chans)))
             previous_sequence = -1
             event_id, active_event, observed_at, onset_at = 0, None, None, None
+            observed_sample = None
             with sd.InputStream(device=self.dev, channels=CHANNELS, samplerate=FS, dtype='float32',
                                 callback=self._capture):
                 self.ready.set()
@@ -222,6 +225,7 @@ class Listener(threading.Thread):
                         pending = pending[:0]
                         self.pos = 0  # the retained WAV must not bridge missing audio either
                         active_event, observed_at, onset_at = None, None, None
+                        observed_sample = None
                     previous_sequence = sequence
                     self._keep(block)
                     pending = np.concatenate([pending, block[:, self.chans]])
@@ -232,6 +236,7 @@ class Listener(threading.Thread):
                         out = tracker.push(loc.stft(frame)[0])
                         if tracker.quiet == 0:  # Tracker adds evidence only on active frames
                             observed_at = captured_at - len(pending) / FS
+                            observed_sample = self.pos - len(pending)
                             if active_event is None or was_quiet:
                                 event_id += 1
                                 active_event, onset_at = event_id, observed_at
@@ -244,12 +249,27 @@ class Listener(threading.Thread):
                                  'event_id': active_event, 'observed_at': observed_at,
                                  'onset_at': onset_at, 'emitted_at': time.monotonic()}
                         if ended:
-                            clip = self._recent(min(out[1]['seconds'] + 0.9, 6.0))  # the sound + its quiet tail
+                            # self.pos includes the WHOLE callback, including its
+                            # unprocessed pending samples. Slice by processed
+                            # sample indices, never by callback-arrival time or
+                            # an assumed quiet-tail duration.
+                            fix = out[1]
+                            evidence_end = int(fix.get('evidence_end_sample', observed_sample))
+                            evidence_start = int(fix.get('evidence_start_sample',
+                                                        max(0, evidence_end - int(min(fix['seconds'], 1.) * FS))))
+                            clip, audio_start, audio_end = self._sample_range(evidence_start, evidence_end)
+                            event.update(evidence_started_at=observed_at + (evidence_start - observed_sample) / FS,
+                                         evidence_ended_at=observed_at + (evidence_end - observed_sample) / FS,
+                                         audio_started_at=observed_at + (audio_start - observed_sample) / FS,
+                                         audio_ended_at=observed_at + (audio_end - observed_sample) / FS,
+                                         audio_complete=audio_start == evidence_start and audio_end == evidence_end,
+                                         final_reason=fix.get('final_reason', 'quiet'),
+                                         segment_seconds=fix.get('segment_seconds', fix['seconds']))
                             # Measure before wav_bytes peak-normalizes the upload clip.
                             # This is digital input level, not calibrated sound pressure.
                             raw = clip[:, self.chans].astype(float)
                             event['level_dbfs'] = float(20 * np.log10(max(np.sqrt(np.mean(raw * raw)), 1e-12))) if raw.size else None
-                            event['wav'] = wav_bytes(clip[:, self.chans].mean(axis=1))
+                            event['wav'] = wav_bytes(clip[:, self.chans].mean(axis=1)) if len(clip) else None
                             event['emitted_at'] = time.monotonic()
                             self.post(event)
                             active_event, observed_at, onset_at = None, None, None
@@ -285,6 +305,14 @@ class Listener(threading.Thread):
     def _recent(self, seconds):
         n = min(int(seconds * FS), self.pos, len(self.buf))
         return self.buf[(self.pos - n + np.arange(n)) % len(self.buf)]
+
+    def _sample_range(self, start, end):
+        """Retained absolute sample interval [start,end); excludes pending/future audio."""
+        oldest = max(0, self.pos - len(self.buf))
+        actual_end = max(oldest, min(int(end), self.pos))
+        actual_start = max(oldest, min(int(start), actual_end))
+        return (self.buf[np.arange(actual_start, actual_end) % len(self.buf)].copy(),
+                actual_start, actual_end)
 
     def record_command(self, seconds=4.0):
         """Record a spoken command from the speech channel; sounds are ignored meanwhile."""

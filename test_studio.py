@@ -138,6 +138,36 @@ class StudioIntegration(unittest.TestCase):
         self.assertAlmostEqual(event['range_m'],np.linalg.norm([.1,0,1]))
         self.assertIn('candidate visible surface',event['phrase'])
 
+    def test_audio_only_record_preserves_clip_without_visual_or_robot_claims(self):
+        instance=self.make(enable_meta=True,rig=RigGeometry(np.eye(4)))
+        now=time.monotonic()
+        ev={'kind':'sound','event_id':91,'observed_at':now,'wav':wav_fixture(),
+            'level_dbfs':-63.75,'fix':{'direction':[.1,0,1],'snr_db':11,'seconds':.1},
+            'evidence_started_at':now-.8,'evidence_ended_at':now,
+            'audio_started_at':now-.8,'audio_ended_at':now,'segment_seconds':3.,'final_reason':'segment_limit'}
+        # Even an accidentally supplied measured view cannot create geometry
+        # when the paired RGB-D frame is missing.
+        view={'quality':{'state':'candidate'},'point':np.array([.1,0,1]),'measured':True,'spot':(10,10)}
+        instance.observe(ev,view,None,now,{},instance.rig,pairing_reason='No RGB-D frame was buffered.')
+        ident=f'{instance.session}-91';saved=instance.store.get(ident)
+        for key in ('range_m','point_camera_m','pixel','image_size','measurement_frame_at','frame_offset_s'):
+            self.assertIsNone(saved[key],key)
+        self.assertEqual(saved['pairing_status'],'audio_only')
+        self.assertIn('No RGB-D',saved['pairing_reason'])
+        self.assertEqual(saved['level_dbfs'],-63.75)
+        for key in ('evidence_started_at','evidence_ended_at','audio_started_at','audio_ended_at','segment_seconds','final_reason'):
+            self.assertEqual(saved[key],ev[key])
+        self.assertIsNone(instance.event_image(ident))
+        self.assertEqual(instance.status()['media_available'][ident],{'audio':True,'image':False})
+        for action in ('context','segment'):
+            with self.assertRaisesRegex(ValueError,'No matched camera snapshot'):
+                instance.submit(action,event_id=ident)
+        self.assertEqual(instance.meta.calls,[])
+        job=self.finish_job(instance,instance.submit('sound',event_id=ident))
+        self.assertEqual(job['state'],'done')
+        self.assertEqual(instance.meta.calls,[('sound',ident,ev['wav'])])
+        self.assertEqual(instance.preview(ident)['status'],'blocked')
+
     def test_finished_events_deduplicate_and_media_is_bounded(self):
         instance=self.make()
         first,ev,frame=self.observe(instance)
