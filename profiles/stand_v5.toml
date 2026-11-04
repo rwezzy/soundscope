@@ -1,0 +1,18 @@
+# Standing mount v5 (cad/v5_stand/PRINT_stand_v5.stl): camera stays on its own tripod, mic board stands
+# above it (LED side forward, USB up). Datum faces + printed springs: any Gemini 2 / XVF3800 in tolerance.
+#   python scope.py --mount stand_v5
+# Numbers from cad/mount_v5_stand.py (board centre from the color lens). Laid over arm_config.toml.
+
+[camera]
+mount = "base"
+
+[camera.base]
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0                  # tilt the tripod down? put the angle here (- = down)
+
+[array]
+mount = "facing"               # board standing, LED side toward the scene
+cable_edge = "up"              # USB edge up
+position_mm = [-0.7, -11.3, 68.2]  # [forward, left, up] from the color lens; +-1.5 mm up over 99-101 mm boards
+front_yaw_deg = 0              # press C in scope.py to calibrate; it is saved here
