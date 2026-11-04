@@ -184,6 +184,51 @@ class Worker(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0][2]['how'], 'your example')
 
+    def test_alerts_need_a_clear_sure_sound_and_do_not_repeat(self):
+        # Live test, Nov 4: false alerts were all under +4 dB; real ones +14 and +19 dB.
+        e = self.enricher(features=('identify',))
+        e.watch = ['doorbell', 'knock on the door']
+        alerts = lambda: [r[2]['watch'] for r in self.results if r[1] == 'alert']
+        self.meta.classify_sound.return_value = {'label': 'knock on door', 'category': 'clap or knock',
+                                                 'description': 'thud', 'confidence': 0.85,
+                                                 'watch': ['knock on the door']}
+        e.process(self.task(clicks(), snr=2.9))          # faint: no alert
+        self.assertEqual(alerts(), [])
+        self.clock.t += 10
+        e.process(self.task(clicks(), snr=18.7))         # clear: alert
+        self.assertEqual(alerts(), ['knock on the door'])
+        self.clock.t += 5
+        e.process(self.task(clicks(), snr=18.0))         # same alert 5 s later: not repeated
+        self.assertEqual(alerts(), ['knock on the door'])
+        self.clock.t += 30
+        self.meta.classify_sound.return_value = {'label': 'doorbell chime', 'category': 'beep or tone',
+                                                 'description': 'two tones', 'confidence': 0.7, 'watch': []}
+        e.process(self.task(tone(), snr=18.8))           # named in the label, not listed: still an alert
+        self.assertEqual(alerts(), ['knock on the door', 'doorbell'])
+        self.clock.t += 30
+        self.meta.classify_sound.return_value = {**self.meta.classify_sound.return_value, 'confidence': 0.35}
+        e.process(self.task(tone(), snr=18.8))           # unsure label: no alert
+        self.assertEqual(alerts(), ['knock on the door', 'doorbell'])
+
+    def test_speech_is_never_shown_to_the_camera_models(self):
+        e = self.enricher()
+        short = voice(0.4)                                # speech-like but too short to caption
+        task = self.task(short, crop_jpeg=b'face', frame_jpeg=b'frame', frame_size=(640, 400), pixel=(1, 1))
+        task['record']['duration_s'] = 0.48
+        task['record']['acoustic']['speech_score'] = 0.66
+        e.process(task)
+        self.meta.source_check.assert_not_called()
+        self.meta.describe_near.assert_not_called()
+        self.meta.segment_at.assert_not_called()
+
+    def test_people_are_not_outlined(self):
+        e = self.enricher()
+        self.meta.source_check.return_value = {**self.meta.source_check.return_value,
+                                               'object': "a person's mouth", 'sound': 'person speaking'}
+        e.process(self.task(clicks(), crop_jpeg=b'after', frame_jpeg=b'f', frame_size=(640, 400), pixel=(1, 1)))
+        self.meta.source_check.assert_called_once()
+        self.meta.segment_at.assert_not_called()
+
     def test_rate_limit(self):
         clock = Clock()
         limit = RateLimit(2.0, 3, clock=clock)

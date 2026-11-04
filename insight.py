@@ -19,6 +19,7 @@ localizer has already decided WHERE each sound is; these steps only add what, wh
 Results go into the sound memory and to on_result(record_id, kind, payload) for the screen.
 """
 import queue
+import re
 import threading
 import time
 
@@ -30,6 +31,12 @@ FEATURES = ('identify', 'captions', 'context', 'outline')
 # or cannot tell where they came from. Matched by Muse Spark (and for free by your own examples).
 ASSIST_WATCH = ('smoke alarm', 'doorbell', 'knock on the door', 'phone ringing', 'baby crying',
                 'kettle whistling')
+# Alerts must be worth interrupting someone for. Live test, Nov 4: every false alert (typing, a clap
+# read as a knock, a hum read as a phone) was under +4 dB over the room; the real ring and knock were
+# +14 and +19 dB. So: clearly audible, a reasonably sure label, and the same alert at most every 20 s.
+ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.6, 20.0
+PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
+                    re.IGNORECASE)
 
 
 class RateLimit:
@@ -69,6 +76,7 @@ class Enricher(threading.Thread):
         self.last_error = 0.0
         self.watch = []          # sounds to alert on; replaced (not mutated) by the viewer
         self.max_age_s = 45.0    # older sounds get no Meta request
+        self.alerted = {}        # watched sound -> when it last raised an alert
         self.limits['source'] = RateLimit(*source_limit, clock=clock)
 
     # -- queueing --------------------------------------------------------------------------------
@@ -106,8 +114,23 @@ class Enricher(threading.Thread):
         return (self.meta is not None and all(n in self.features for n in needs) and self.exhausted is None
                 and self.limits[step].allow())
 
-    def _alerts(self, rid, items, how):
+    def _alerts(self, rid, record, items, how, confidence=None, label=None):
+        """Raise alerts for watched sounds, only when they are clearly audible and reasonably sure.
+        label: what the model called the sound; a label naming a watched sound counts even when the
+        model did not list it as a watch hit ("doorbell chime" -> doorbell)."""
+        snr = (record.get('loudness') or {}).get('snr_db') or 0.0
+        if snr < (ALERT_MIN_SNR_DB if how == 'Muse Spark' else ALERT_MIN_SNR_DB / 2):
+            return
+        if confidence is not None and confidence < ALERT_MIN_CONFIDENCE:
+            return
+        items = list(items)
+        if label:
+            items += [w for w in self.watch if _same_sound(w, label) and w not in items]
+        now = self.clock()
         for item in items:
+            if now - self.alerted.get(item.lower(), -1e9) < ALERT_REPEAT_S:
+                continue
+            self.alerted[item.lower()] = now
             self.on_result(rid, 'alert', {'watch': item, 'how': how})
 
     def _call(self, record_id, fn, *args):
@@ -133,7 +156,8 @@ class Enricher(threading.Thread):
         stale = time.time() - record.get('epoch', time.time()) > self.max_age_s
         acoustic = record.get('acoustic') or {}
         wav = task.get('wav')
-        speechy = acoustic.get('speech_score', 0) >= SPEECH_SCORE and record.get('duration_s', 0) >= 0.5
+        speech_like = acoustic.get('speech_score', 0) >= SPEECH_SCORE
+        speechy = speech_like and record.get('duration_s', 0) >= 0.5  # long enough to caption
 
         watch = list(self.watch)
         if wav and self.references is not None and self.references.items:
@@ -142,7 +166,7 @@ class Enricher(threading.Thread):
                 record.setdefault('sound', {}).update(local_label=label, local_similarity=similarity)
                 self._update(rid, {'sound': {'local_label': label, 'local_similarity': similarity}}, 'label')
                 if similarity >= 0.9:
-                    self._alerts(rid, [w for w in watch if _same_sound(w, label)], 'your example')
+                    self._alerts(rid, record, [w for w in watch if _same_sound(w, label)], 'your example')
         if stale:
             return
 
@@ -154,7 +178,7 @@ class Enricher(threading.Thread):
                  else None)
         crop = task.get('crop_jpeg')
         checked = False
-        if (wav and crop is not None and strong and not speechy and (not trusted_local or watch)
+        if (wav and crop is not None and strong and not speech_like and (not trusted_local or watch)
                 and self._meta_ok('source', ('identify', 'context'))):
             reply = self._call(rid, self.meta.source_check, wav, crop, task.get('crop_before'), facts, watch, sheet,
                                task.get('crop_kind', 'color'))
@@ -172,10 +196,12 @@ class Enricher(threading.Thread):
                                   'surface': surface, 'source': 'muse-spark'}}
                 self.context_cache[self._cell(record)] = (self.clock(), {'near': patch['near']})
                 self._update(rid, patch, 'source')
-                self._alerts(rid, reply.get('watch') or [], 'Muse Spark')
-                if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None:
-                    task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1)
-        if (wav and strong and not speechy and not checked and (not trusted_local or watch)
+                self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['sound_confidence'],
+                             reply['sound'])
+                person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
+                if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
+                    task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
+        if (wav and strong and not speech_like and not checked and (not trusted_local or watch)
                 and self._meta_ok('identify')):
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
             if reply:
@@ -183,7 +209,8 @@ class Enricher(threading.Thread):
                                              'description': reply['description'],
                                              'confidence': round(reply['confidence'], 2), 'source': 'muse-spark'}},
                              'identify')
-                self._alerts(rid, reply.get('watch') or [], 'Muse Spark')
+                self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
+                             reply['label'])
 
         if speechy and self._meta_ok('captions'):
             speech_wav = task.get('speech_wav') or wav
@@ -207,7 +234,7 @@ class Enricher(threading.Thread):
         # Context alone only when the combined source check is not in use (no double spending), and
         # never for speech: the caption says enough, and the crop would show the person talking.
         if (crop is not None and 'context' in self.features and 'identify' not in self.features
-                and not checked and not speechy):
+                and not checked and not speech_like):
             key = self._cell(record)
             cached = self.context_cache.get(key)
             if cached and self.clock() - cached[0] <= self.ttl:
@@ -222,7 +249,8 @@ class Enricher(threading.Thread):
                     self.context_cache[key] = (self.clock(), patch)
                     self._update(rid, patch, 'context')
 
-        if task.get('outline') and task.get('frame_jpeg') is not None and self._meta_ok('outline'):
+        if task.get('outline') and task.get('frame_jpeg') is not None and not speech_like \
+                and self._meta_ok('outline'):
             w, h = task['frame_size']
             u, v = task['pixel']
             polygons = self._call(rid, self.meta.segment_at, task['frame_jpeg'], w, h, u, v)
@@ -247,9 +275,16 @@ def _bare(noun):
     return words[1] if len(words) == 2 and words[0].lower() in ('a', 'an', 'the') else noun.strip()
 
 
+def _stem(word):
+    for suffix in ('ing', 'ed', 'es', 's'):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[:-len(suffix)]
+    return word
+
+
 def _same_sound(watch_item, label):
-    """Loose match between a watched sound and a label: shared content words ("kettle whistling" ~ "kettle")."""
-    stop = {'a', 'an', 'the', 'my', 'is', 'sound', 'of', 'when', 'if'}
-    a = {w.rstrip('s') for w in watch_item.lower().split() if w not in stop}
-    b = {w.rstrip('s') for w in label.lower().split() if w not in stop}
-    return bool(a & b)
+    """Loose match between a watched sound and a label: a shared content word ("doorbell chime" ~ "doorbell",
+    "knocking" ~ "knock on the door")."""
+    stop = {'a', 'an', 'the', 'my', 'is', 'sound', 'of', 'on', 'when', 'if', 'probably', 'some', 'noise'}
+    words = lambda text: {_stem(w) for w in re.findall(r"[a-z]+", text.lower()) if w not in stop}
+    return bool(words(watch_item) & words(label))

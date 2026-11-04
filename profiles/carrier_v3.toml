@@ -1,0 +1,23 @@
+# Adjustable sensor carrier v3 (Meta_Hack/hardware/soundscope_sensor_carrier_v3): the ring that holds the
+# mic board with three screw-adjusted shoes and toe clamps, ABOVE the Gemini 2, which stays on its tripod.
+#   python scope.py --mount carrier_v3
+# Board centre from that design's own geometry check (mic_offset_mm [0, 20, 6] on the holder's MY = 108,
+# BACK = 8 + half the 1.2 mm board): (0, 128, 14.6) mm in Orbbec's housing frame (x across, y up,
+# z toward the scene). Orbbec's housing model is centred in x and y with its front glass at z = 11.35, and
+# the color lens sits 11 mm off centre. So from the color lens the board is about 128 mm up, 11 mm to the
+# lens's right (seen from behind) and a few mm forward. Shoe adjustment can move it a few mm: press C.
+# Laid over arm_config.toml; safety settings stay there.
+
+[camera]
+mount = "base"
+
+[camera.base]
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0                  # tripod tilted? put the angle here (- = down)
+
+[array]
+mount = "facing"               # board standing, LED side toward the scene
+cable_edge = "up"              # USB edge up
+position_mm = [4, -11, 128]    # [forward, left, up] from the color lens
+front_yaw_deg = 0              # press C in scope.py --mount carrier_v3 to calibrate; it is saved here
