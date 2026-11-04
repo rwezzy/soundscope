@@ -332,8 +332,39 @@ def crop_jpeg(frame, pixel, size_frac=0.36, max_side=448):
     cv2.line(crop, (cu, cv_ - 12), (cu, cv_ + 12), (0, 255, 255), 1, cv2.LINE_AA)
     if crop.shape[0] > max_side:
         crop = cv2.resize(crop, (max_side, max_side), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode('.jpg', crop, [cv2.IMWRITE_JPEG_QUALITY, 82])
+    ok, buf = cv2.imencode('.jpg', blur_faces(crop), [cv2.IMWRITE_JPEG_QUALITY, 82])
     return buf.tobytes() if ok else None
+
+
+_FACES = None
+
+
+def blur_faces(image):
+    """Best-effort: blur the faces OpenCV's bundled face finders see before a picture leaves this computer.
+    They miss angled or dim faces (tested Nov 4), so --private is the real switch: it sends no pictures.
+    This only hides people; it never decides where a sound came from."""
+    global _FACES
+    if os.environ.get('SOUNDSCOPE_NO_BLUR') == '1':
+        return image
+    if _FACES is None:
+        _FACES = [cv2.CascadeClassifier(cv2.data.haarcascades + name)
+                  for name in ('haarcascade_frontalface_default.xml', 'haarcascade_profileface.xml')]
+    gray = cv2.equalizeHist(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))
+    w_img = image.shape[1]
+    side = max(24, min(image.shape[:2]) // 12)
+    boxes = []
+    for finder in _FACES:
+        for flipped in (False, True):  # the profile finder only knows one side; a mirror covers the other
+            found = finder.detectMultiScale(cv2.flip(gray, 1) if flipped else gray, 1.1, 3, minSize=(side, side))
+            boxes += [(w_img - x - w, y, w, h) if flipped else (x, y, w, h) for x, y, w, h in found]
+    out = image.copy()
+    for x, y, w, h in boxes:
+        pad = int(0.3 * max(w, h))
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(out.shape[1], x + w + pad), min(out.shape[0], y + h + pad)
+        k = max(15, (max(w, h) // 3) | 1)
+        out[y0:y1, x0:x1] = cv2.GaussianBlur(out[y0:y1, x0:x1], (k, k), 0)
+    return out
 
 
 def crop_box(shape, pixel, size_frac=0.36):
@@ -384,7 +415,7 @@ def frame_jpeg(frame, pixel, max_width=1280):
     h, w = frame.shape[:2]
     scale = min(1.0, max_width / w)
     small = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1 else frame
-    ok, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok, buf = cv2.imencode('.jpg', blur_faces(small), [cv2.IMWRITE_JPEG_QUALITY, 85])
     return ((buf.tobytes() if ok else None), (small.shape[1], small.shape[0]),
             (int(pixel[0] * scale), int(pixel[1] * scale)), scale)
 
@@ -622,6 +653,8 @@ class Session:
         assist = getattr(args, 'assist', False)
         self.features = (set(FEATURES) if getattr(args, 'meta', False) or assist
                          else {f for f in FEATURES if getattr(args, f, False)})
+        if getattr(args, 'private', False):  # no camera pictures leave this computer
+            self.features -= {'context', 'outline'}
         self.names = [n.strip() for n in getattr(args, 'name', None) or [] if n.strip()]  # alert when said
         self.memory = sound_memory.Memory() if getattr(args, 'memory', False) else None
         self.references = sound_memory.ReferenceBank() if self.memory is not None or self.features else None
@@ -643,6 +676,7 @@ class Session:
             self.enricher = Enricher(self.memory, self.meta, self.features,
                                      on_result=lambda *r: self.results.append(r),
                                      references=self.references, speakers=self.speakers)
+            self.enricher.listen_for_names = bool(self.names)
             self.enricher.start()
         for sound in (list(ASSIST_WATCH) if assist else []) + list(getattr(args, 'watch', None) or []):
             self.add_watch(sound)
@@ -1130,6 +1164,8 @@ def main():
     p.add_argument('--assist', action='store_true',
                    help='sound-awareness mode: all Meta features + alerts for ' + ', '.join(ASSIST_WATCH))
     p.add_argument('--name', action='append', help='alert when someone says this name (captions), e.g. --name Keith')
+    p.add_argument('--private', action='store_true',
+                   help='send no camera pictures to Meta (labels from sound only, captions, alerts still work)')
     p.add_argument('--meta', action='store_true', help='all Meta features: ' + ', '.join(FEATURES))
     for feature, text in (('identify', 'Muse Spark labels each clear sound'),
                           ('captions', 'Muse Voice Transcribe captions speech, talkers named by direction'),

@@ -184,6 +184,7 @@ def cmd_listen(args):
         features = set(FEATURES) - {'context', 'outline'} if meta is not None else set()
         enricher = Enricher(memory, meta, features, on_result=show, references=references)
         enricher.watch = list(ASSIST_WATCH if args.assist else []) + list(args.watch or [])
+        enricher.listen_for_names = bool(args.name)
         enricher.start()
     inbox = queue.Queue()
     listener = Listener(inbox.put, updates=True, threshold_db=cfg.get('listen', {}).get('threshold_db', 0.5))

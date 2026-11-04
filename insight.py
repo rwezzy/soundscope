@@ -18,7 +18,6 @@ localizer has already decided WHERE each sound is; these steps only add what, wh
 
 Results go into the sound memory and to on_result(record_id, kind, payload) for the screen.
 """
-import queue
 import re
 import threading
 import time
@@ -35,6 +34,9 @@ ASSIST_WATCH = ('smoke alarm', 'doorbell', 'knock on the door', 'phone ringing',
 # read as a knock, a hum read as a phone) was under +4 dB over the room; the real ring and knock were
 # +14 and +19 dB. So: clearly audible, a reasonably sure label, and the same alert at most every 20 s.
 ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.6, 20.0
+# A very clear sound (20 dB or more over the room) alerts with a less sure label: missing an alarm is worse
+# than a false alarm. Live, Nov 4: a +33 dB ring was labeled "phone ringing" at only 0.4.
+ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.4
 PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
                     re.IGNORECASE)
 
@@ -44,21 +46,46 @@ class RateLimit:
 
     def __init__(self, gap_s, per_minute, clock=time.monotonic):
         self.gap, self.per_minute, self.clock, self.times = gap_s, per_minute, clock, []
+        self.lock = threading.Lock()
 
     def allow(self):
-        now = self.clock()
-        self.times = [t for t in self.times if now - t < 60]
-        if (self.times and now - self.times[-1] < self.gap) or len(self.times) >= self.per_minute:
-            return False
-        self.times.append(now)
-        return True
+        with self.lock:  # shared by the worker threads
+            now = self.clock()
+            self.times = [t for t in self.times if now - t < 60]
+            if (self.times and now - self.times[-1] < self.gap) or len(self.times) >= self.per_minute:
+                return False
+            self.times.append(now)
+            return True
+
+
+class NewestFirst:
+    """Bounded task stack: the newest sound is handled first; when full, the oldest is dropped."""
+
+    def __init__(self, size):
+        self.items, self.size, self.ready = [], size, threading.Condition()
+
+    def put(self, item):
+        with self.ready:
+            self.items.append(item)
+            del self.items[:-self.size]
+            self.ready.notify()
+
+    def get(self, timeout):
+        with self.ready:
+            if not self.items and not self.ready.wait(timeout):
+                return None
+            return self.items.pop() if self.items else None
+
+    def qsize(self):
+        with self.ready:
+            return len(self.items)
 
 
 class Enricher(threading.Thread):
     def __init__(self, memory, meta, features, on_result=None, references=None, speakers=None,
                  identify_limit=(3.0, 10), caption_limit=(1.0, 20), context_limit=(5.0, 6), outline_limit=(10.0, 3),
-                 source_limit=(4.0, 8), context_cell_m=0.25, context_ttl_s=600.0, queue_size=6,
-                 clock=time.monotonic):
+                 source_limit=(2.0, 12), context_cell_m=0.25, context_ttl_s=600.0, queue_size=6,
+                 workers=3, clock=time.monotonic):
         super().__init__(daemon=True)
         self.memory, self.meta = memory, meta
         self.features = set(features) & set(FEATURES)
@@ -70,7 +97,10 @@ class Enricher(threading.Thread):
                        'outline': RateLimit(*outline_limit, clock=clock)}
         self.cell, self.ttl, self.clock = context_cell_m, context_ttl_s, clock
         self.context_cache = {}  # cell -> (time, patch)
-        self.tasks = queue.Queue(maxsize=queue_size)
+        self.tasks = NewestFirst(queue_size)
+        self.workers = max(1, workers)  # Muse Spark takes 3-10 s; one at a time fell 40 s behind live
+        self.lock = threading.Lock()
+        self.listen_for_names = False   # set when someone's name should raise an alert
         self.stop_event = threading.Event()
         self.exhausted = None    # budget message once the budget is used up
         self.last_error = 0.0
@@ -83,24 +113,20 @@ class Enricher(threading.Thread):
 
     def submit(self, task):
         """Never blocks the caller; when full, the oldest waiting task is dropped."""
-        while True:
-            try:
-                self.tasks.put_nowait(task)
-                return
-            except queue.Full:
-                try:
-                    self.tasks.get_nowait()
-                except queue.Empty:
-                    pass
+        self.tasks.put(task)
+
+    def start(self):
+        super().start()
+        for _ in range(self.workers - 1):
+            threading.Thread(target=self.run, daemon=True).start()
 
     def stop(self):
         self.stop_event.set()
 
     def run(self):
         while not self.stop_event.is_set():
-            try:
-                task = self.tasks.get(timeout=0.2)
-            except queue.Empty:
+            task = self.tasks.get(timeout=0.2)
+            if task is None:
                 continue
             try:
                 self.process(task)
@@ -121,16 +147,18 @@ class Enricher(threading.Thread):
         snr = (record.get('loudness') or {}).get('snr_db') or 0.0
         if snr < (ALERT_MIN_SNR_DB if how == 'Muse Spark' else ALERT_MIN_SNR_DB / 2):
             return
-        if confidence is not None and confidence < ALERT_MIN_CONFIDENCE:
+        needed = ALERT_LOUD_CONFIDENCE if snr >= ALERT_LOUD_SNR_DB else ALERT_MIN_CONFIDENCE
+        if confidence is not None and confidence < needed:
             return
         items = list(items)
         if label:
             items += [w for w in self.watch if _same_sound(w, label) and w not in items]
-        now = self.clock()
-        for item in items:
-            if now - self.alerted.get(item.lower(), -1e9) < ALERT_REPEAT_S:
-                continue
-            self.alerted[item.lower()] = now
+        with self.lock:
+            now = self.clock()
+            fresh = [item for item in items if now - self.alerted.get(item.lower(), -1e9) >= ALERT_REPEAT_S]
+            for item in fresh:
+                self.alerted[item.lower()] = now
+        for item in fresh:
             self.on_result(rid, 'alert', {'watch': item, 'how': how})
 
     def _call(self, record_id, fn, *args):
@@ -212,7 +240,10 @@ class Enricher(threading.Thread):
                 self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
                              reply['label'])
 
-        if speechy and self._meta_ok('captions'):
+        # Listening for a name: also transcribe longer sounds that did not look like speech (a snap or
+        # a door at the start can hide a sentence; live, Nov 4). A caption costs about $0.0003.
+        long_enough = self.listen_for_names and record.get('duration_s', 0) >= 1.0
+        if (speechy or long_enough) and self._meta_ok('captions'):
             speech_wav = task.get('speech_wav') or wav
             reply = self._call(rid, self.meta.transcribe_turns, speech_wav) if speech_wav else None
             if reply and reply['turns']:
@@ -224,7 +255,7 @@ class Enricher(threading.Thread):
                 for turn, az in zip(turns, azimuths):
                     az = fallback if az is None else az
                     out.append({**turn, 'azimuth_deg': None if az is None else round(az, 1),
-                                'name': self.speakers.name_for(az), 'where': direction_words(az)})
+                                'name': self._speaker(az), 'where': direction_words(az)})
                 main = max(out, key=lambda t: t['end_s'] - t['start_s'])
                 patch = {'speech': {'text': reply['text'], 'speaker': main['name'], 'turns': out},
                          'sound': {'label': 'speech', 'category': 'speech', 'confidence': 0.9,
@@ -257,6 +288,10 @@ class Enricher(threading.Thread):
             if polygons:
                 self._update(rid, {'outline': {'source': 'sam-3.1', 'polygons': len(polygons)}}, 'outline',
                              {'polygons': polygons, 'scale': task.get('scale', 1.0)})
+
+    def _speaker(self, azimuth):
+        with self.lock:
+            return self.speakers.name_for(azimuth)
 
     def _cell(self, record):
         """Where a context answer can be reused: a 25 cm cell, else a pixel or direction bin."""

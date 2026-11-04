@@ -229,6 +229,31 @@ class Worker(unittest.TestCase):
         self.meta.source_check.assert_called_once()
         self.meta.segment_at.assert_not_called()
 
+    def test_very_loud_sounds_alert_with_a_less_sure_label(self):
+        e = self.enricher(features=('identify',))
+        e.watch = ['phone ringing']
+        self.meta.classify_sound.return_value = {'label': 'phone ringing', 'category': 'alarm or ringtone',
+                                                 'description': 'beeps', 'confidence': 0.4, 'watch': []}
+        e.process(self.task(tone(), snr=12.0))            # 0.4 sure at +12 dB: no alert
+        self.clock.t += 30
+        e.process(self.task(tone(), snr=33.0))            # 0.4 sure at +33 dB (live ring, Nov 4): alert
+        self.assertEqual([r[2]['watch'] for r in self.results if r[1] == 'alert'], ['phone ringing'])
+
+    def test_names_are_listened_for_in_longer_sounds(self):
+        e = self.enricher(features=('captions',))
+        e.process(self.task(clicks(n=6, gap=0.25)))       # 1.8 s of bursts, not speech-like
+        self.meta.transcribe_turns.assert_not_called()
+        e.listen_for_names = True
+        e.process(self.task(clicks(n=6, gap=0.25)))
+        self.meta.transcribe_turns.assert_called_once()
+
+    def test_newest_sound_is_handled_first_and_oldest_dropped(self):
+        from insight import NewestFirst
+        stack = NewestFirst(3)
+        for i in range(5):
+            stack.put(i)
+        self.assertEqual([stack.get(0.1) for _ in range(4)], [4, 3, 2, None])
+
     def test_rate_limit(self):
         clock = Clock()
         limit = RateLimit(2.0, 3, clock=clock)

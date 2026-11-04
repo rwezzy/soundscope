@@ -91,6 +91,27 @@ class Wrist(unittest.TestCase):
             scope.run(SimpleNamespace(no_heatmap=False, diagnostics=False), cfg)
 
 
+class Privacy(unittest.TestCase):
+    def test_pictures_for_meta_go_through_the_face_blur(self):
+        frame = np.full((400, 640, 3), 90, np.uint8)
+        self.assertEqual(scope.blur_faces(frame).shape, frame.shape)
+        with mock.patch.object(scope, 'blur_faces', side_effect=lambda im: im * 0) as blur:
+            jpeg = scope.crop_jpeg(frame, (320, 200))
+            whole = scope.frame_jpeg(frame, (320, 200))[0]
+        self.assertEqual(blur.call_count, 2)
+        import cv2
+        self.assertEqual(int(cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).max()), 0)
+        self.assertEqual(int(cv2.imdecode(np.frombuffer(whole, np.uint8), cv2.IMREAD_COLOR).max()), 0)
+
+
+class PrivateMode(unittest.TestCase):
+    def test_private_sends_no_pictures(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(sm, 'MEMORY_DIR', aim.Path(folder)),                 mock.patch.object(sm, 'REFERENCES_DIR', aim.Path(folder) / 'refs'),                 mock.patch.object(scope, 'Meta'), mock.patch.object(scope, 'Enricher'):
+            session = scope.Session(SimpleNamespace(memory=True, assist=True, private=True), aim.load_config(), {})
+            self.assertEqual(session.features, {'identify', 'captions'})
+            session.close()
+
+
 class MissingCamera(unittest.TestCase):
     def test_unplugged_camera_is_reported_instead_of_crashing(self):
         import camera
