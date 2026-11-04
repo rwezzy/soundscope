@@ -4,6 +4,8 @@
   python scope.py --mount wrist              camera and mics clamped on the arm's gripper
   python scope.py --meta                     also let Meta models label sounds, caption speech,
                                              name what is near the spot and outline found targets
+  python scope.py --assist --name Keith      sound awareness: alerts for alarms, doorbell, knocks,
+                                             phone, baby, kettle, and when someone says your name
   python scope.py --target "keys jingling"   only highlight sounds Muse Spark hears as this
   python scope.py --record demo.mp4          also save the annotated video
 
@@ -39,7 +41,7 @@ from calibration import CalibrationSession, wrap_deg
 from localization_quality import assess
 import scope_ui
 import sound_memory
-from insight import FEATURES, Enricher
+from insight import ASSIST_WATCH, FEATURES, Enricher
 from meta_api import COMMAND_WORDS, ENV_FILE, Meta, MetaError, load_env
 
 WINDOW = 'SoundScope'
@@ -617,8 +619,10 @@ class Session:
     def __init__(self, args, cfg, ui):
         self.cfg, self.ui = cfg, ui
         self.mode = 'wrist' if (cfg.get('array') or {}).get('on_arm') else 'tripod'
-        self.features = (set(FEATURES) if getattr(args, 'meta', False)
+        assist = getattr(args, 'assist', False)
+        self.features = (set(FEATURES) if getattr(args, 'meta', False) or assist
                          else {f for f in FEATURES if getattr(args, f, False)})
+        self.names = [n.strip() for n in getattr(args, 'name', None) or [] if n.strip()]  # alert when said
         self.memory = sound_memory.Memory() if getattr(args, 'memory', False) else None
         self.references = sound_memory.ReferenceBank() if self.memory is not None or self.features else None
         self.speakers = sound_memory.SpeakerMap()
@@ -640,7 +644,7 @@ class Session:
                                      on_result=lambda *r: self.results.append(r),
                                      references=self.references, speakers=self.speakers)
             self.enricher.start()
-        for sound in getattr(args, 'watch', None) or []:
+        for sound in (list(ASSIST_WATCH) if assist else []) + list(getattr(args, 'watch', None) or []):
             self.add_watch(sound)
 
     @property
@@ -682,7 +686,7 @@ class Session:
     def add_watch(self, sound):
         sound = sound.strip()
         if sound and sound.lower() not in (w.lower() for w in self.watch):
-            self.watch = (self.watch + [sound])[-5:]
+            self.watch = (self.watch + [sound])[-10:]
         if self.enricher is not None:
             self.enricher.watch = list(self.watch)
         return self.watch
@@ -777,6 +781,11 @@ class Session:
                     text = f"{turn['name']} ({turn['where']}): {turn['text']}"
                     self.show(text, pixel, now + CAPTION_S, 'speech')
                     print('  ' + text, flush=True)
+                    called = sound_memory.name_called(turn['text'], self.names)
+                    if called:  # someone is calling you: say who and from where
+                        self.raise_alert(rid, rec, f"{turn['name']} said \"{called}\" ({turn['where']})",
+                                         'name called', pixel, now)
+                        notes.append(f"ALERT: {turn['name']} said \"{called}\" ({turn['where']})")
             elif kind in ('identify', 'label') and rec is not None:
                 self.show(sound_memory.what_it_was(rec), pixel, now + 4.0, 'label')
                 print('  ' + sound_memory.phrase(rec), flush=True)
@@ -791,13 +800,8 @@ class Session:
             elif kind == 'alert':
                 where = (rec or {}).get('where', {}).get('words', '')
                 text = f"ALERT: {payload['watch']}" + (f' ({where})' if where else '')
-                self.alert = (text, now + 8.0)
-                self.captions.append({'text': text, 'pixel': pixel if pixel != 'late' else None,
-                                      'until': now + 8.0, 'kind': 'alert'})
-                if self.memory is not None and rec is not None:
-                    self.memory.update(rid, {'alerts': sorted(set((rec.get('alerts') or []) + [payload['watch']]))})
+                self.raise_alert(rid, rec, text[len('ALERT: '):], payload['watch'], pixel, now)
                 notes.append(f"{text}, matched by {payload['how']}")
-                beep()
             elif kind == 'outline':
                 scale = payload.get('scale') or 1.0
                 polygons = [(np.asarray(poly, float) / scale).astype(np.int32) for poly in payload['polygons']]
@@ -812,6 +816,15 @@ class Session:
         if self.outline and self.outline[2] <= now:
             self.outline = None
         return notes
+
+    def raise_alert(self, rid, rec, text, tag, pixel, now):
+        """Banner + caption at the sound + beep, and the alert saved on the sound's record."""
+        self.alert = ('ALERT: ' + text, now + 8.0)
+        self.captions.append({'text': 'ALERT: ' + text, 'pixel': pixel if pixel != 'late' else None,
+                              'until': now + 8.0, 'kind': 'alert'})
+        if self.memory is not None and rec is not None:
+            self.memory.update(rid, {'alerts': sorted(set((rec.get('alerts') or []) + [tag]))})
+        beep()
 
     def show(self, text, pixel, until, kind):
         """A caption at the sound's pixel, unless the result came in too late to be useful on screen."""
@@ -1042,7 +1055,8 @@ def run(args, cfg):
                        fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
                        viewport_size=viewport, captions=session.captions,
-                       outlines=[poly for polys, _ in session.outlines for poly in polys])
+                       outlines=[poly for polys, _ in session.outlines for poly in polys],
+                       alert=session.alert[0] if session.alert else None)
             cv2.imshow(WINDOW, out)
             displayed_viewport = viewport
             displayed = (latest, depth, dict(k))
@@ -1113,6 +1127,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--mount', choices=sorted(aim.profiles()), help='mount profile (default: SOUNDSCOPE_MOUNT or none)')
     p.add_argument('--target', help='only highlight sounds Muse Spark hears as this')
+    p.add_argument('--assist', action='store_true',
+                   help='sound-awareness mode: all Meta features + alerts for ' + ', '.join(ASSIST_WATCH))
+    p.add_argument('--name', action='append', help='alert when someone says this name (captions), e.g. --name Keith')
     p.add_argument('--meta', action='store_true', help='all Meta features: ' + ', '.join(FEATURES))
     for feature, text in (('identify', 'Muse Spark labels each clear sound'),
                           ('captions', 'Muse Voice Transcribe captions speech, talkers named by direction'),

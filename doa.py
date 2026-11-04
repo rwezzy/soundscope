@@ -148,8 +148,12 @@ class Tracker:
     """Streaming detector: follows the room's noise floor, spots sounds, and localizes each one."""
 
     def __init__(self, loc, threshold_db=0.5, memory_s=0.6, gap_s=0.5, update_s=0.15,
-                 min_window_s=3.0, min_bias=1.1, min_smooth=0.9):
+                 min_window_s=3.0, min_bias=1.1, min_smooth=0.9, max_event_s=8.0):
         fps = FS / HOP
+        # A safety cap (idea from the parallel version's 3 s segments): a sound that never stops is
+        # reported every max_event_s, so nothing can stay "active" forever. 8 s keeps ordinary
+        # sounds (claps, rings, sentences) whole; the noise floor above normally ends them first.
+        self.max_frames = max(3, int(max_event_s * fps))
         self.loc = loc
         self.threshold = 10 ** (threshold_db / 10)
         self.decay = np.exp(-1 / (memory_s * fps))
@@ -217,7 +221,12 @@ class Tracker:
             self.quiet = 0
             self._add(X, w)
             self.ratios.append(ratio)
-            if self.frames >= 3 and self.frames % self.update_every == 0:
+            if self.frames >= self.max_frames:
+                out = ('end', self._result(self.event))
+                if out[1]:
+                    out[1]['final_reason'] = 'max_length'
+                self._new_event()  # still active: the next frames start a fresh sound
+            elif self.frames >= 3 and self.frames % self.update_every == 0:
                 out = ('update', self._result(self.run))
         else:
             self.quiet += 1

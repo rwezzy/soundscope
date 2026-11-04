@@ -305,6 +305,20 @@ def _sam_outline(image, view, scale):
         cv2.polylines(image, [pts], True, TEXT, max(1, int(scale)), cv2.LINE_AA)
 
 
+def _alert_banner(image, text):
+    """A wide red bar across the top of the picture, readable from across a room."""
+    h, w = image.shape[:2]
+    bar = max(40, h // 9)
+    overlay = image.copy()
+    cv2.rectangle(overlay, (0, 0), (w - 1, bar), ALERT, -1)
+    cv2.addWeighted(overlay, 0.88, image, 0.12, 0, dst=image)
+    size = 0.9 * bar / 48
+    text = _fit(text, w - 24, size)
+    tw, th = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, size, 2)[0]
+    cv2.putText(image, text, ((w - tw) // 2, (bar + th) // 2), cv2.FONT_HERSHEY_SIMPLEX, size, (255, 255, 255),
+                max(2, int(size * 2.2)), cv2.LINE_AA)
+
+
 def _captions(image, captions, scale):
     """Caption bubbles near the pixel each sound came from (bottom center when off screen)."""
     h, w = image.shape[:2]
@@ -354,7 +368,7 @@ def _sparkline(img, view, rect, color):
 
 def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None,
            heatmap=True, diagnostics=False, paused=False, calibration_active=False,
-           viewport_size=None, status=None, captions=(), outlines=()):
+           viewport_size=None, status=None, captions=(), outlines=(), alert=None):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -410,6 +424,8 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     if outlines:  # SAM outlines of sound sources, kept a few seconds after their sound
         _sam_outline(camera, {'sam_outline': outlines}, s)
     _captions(camera, captions, frame.shape[1] / 1280.0 * 1.4)
+    if alert:
+        _alert_banner(camera, alert)
     if (w, h) != (frame.shape[1], frame.shape[0]):
         interpolation = cv2.INTER_AREA if w < frame.shape[1] else cv2.INTER_LINEAR
         camera = cv2.resize(camera, (w, h), interpolation=interpolation)

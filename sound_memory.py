@@ -753,6 +753,14 @@ class SpeakerMap:
         return [(c[0], direction_words(c[1]), ago(c[2], now)) for c in sorted(live, key=lambda c: c[1])]
 
 
+def name_called(text, names):
+    """The first of `names` said as a whole word in a caption, or None ("Keith!" yes, "Keithley" no)."""
+    for name in names or ():
+        if name and re.search(rf"(?<![\w']){re.escape(name)}(?![\w'])", text or '', re.IGNORECASE):
+            return name
+    return None
+
+
 def turn_directions(turns, track, clip_end_at, clip_seconds):
     """Median camera azimuth heard during each diarized turn.
 

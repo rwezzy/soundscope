@@ -206,6 +206,32 @@ class Viewer(unittest.TestCase):
             self.assertEqual(session.outlines, [])
             session.close()
 
+    def test_assist_mode_watches_household_sounds_and_names(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(sm, 'MEMORY_DIR', aim.Path(folder)),                 mock.patch.object(sm, 'REFERENCES_DIR', aim.Path(folder) / 'refs'),                 mock.patch.object(scope, 'Meta'), mock.patch.object(scope, 'Enricher'),                 mock.patch.object(scope, 'beep') as beep:
+            cfg = aim.load_config(profile='tripod')
+            session = scope.Session(SimpleNamespace(memory=True, assist=True, name=['Keith'], watch=['dog barking']),
+                                    cfg, {'note': ''})
+            self.assertEqual(session.features, set(scope.FEATURES))
+            for sound in ('smoke alarm', 'doorbell', 'knock on the door', 'baby crying', 'dog barking'):
+                self.assertIn(sound, session.watch)
+            fix = {'direction': aim.camera_to_array([-0.6, 0, 0.8], cfg), 'z': 30.0, 'snr_db': 18.0, 'seconds': 1.4}
+            view = {'spot': (40, 40), 'point': np.array([-0.6, 0.0, 0.8]), 'measured': True,
+                    'quality': {'state': 'candidate'}}
+            rec = session.record({'kind': 'sound', 'fix': fix, 'event_id': 1, 'observed_at': scope.time.monotonic(),
+                                  'wav': sm_wav()}, view, np.zeros((80, 120, 3), np.uint8))
+            turn = {'name': 'Speaker 1', 'where': 'to the left', 'text': 'Keith, dinner is ready'}
+            session.results.append((rec['id'], 'captions', [turn]))
+            notes = session.drain(now=50.0)
+            self.assertIn('Speaker 1 said "Keith" (to the left)', notes[0])
+            self.assertTrue(session.alert[0].startswith('ALERT: Speaker 1 said "Keith"'))
+            self.assertIn('name called', session.memory.get(rec['id'])['alerts'])
+            beep.assert_called_once()
+            frame = np.full((200, 320, 3), 60, np.uint8)
+            banner = scope_ui.render(frame, None, None, 'n', now=1.0, alert=session.alert[0])
+            plain = scope_ui.render(frame, None, None, 'n', now=1.0)
+            self.assertGreater(int(np.abs(banner.astype(int) - plain.astype(int)).sum()), 10000)
+            session.close()
+
     def test_dashboard_draws_status_captions_and_outline(self):
         frame = np.full((200, 320, 3), 60, np.uint8)
         view = {'time': 10.0, 'final': True, 'spot': (160, 100), 'quality': {'state': 'candidate'},

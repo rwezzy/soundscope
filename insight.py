@@ -26,6 +26,10 @@ from meta_api import BudgetError, MetaError
 from sound_memory import SPEECH_SCORE, SpeakerMap, direction_words, turn_directions, wav_samples
 
 FEATURES = ('identify', 'captions', 'context', 'outline')
+# Sound-awareness mode (--assist): sounds people most need to know about when they cannot hear them,
+# or cannot tell where they came from. Matched by Muse Spark (and for free by your own examples).
+ASSIST_WATCH = ('smoke alarm', 'doorbell', 'knock on the door', 'phone ringing', 'baby crying',
+                'kettle whistling')
 
 
 class RateLimit:

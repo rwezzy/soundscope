@@ -8,6 +8,7 @@
   python soundscope.py enroll "phone ringing"              record your own example (3 takes)
   python soundscope.py examples                            list your examples
   python soundscope.py listen [--meta] [--mount tripod]    mics only: log sounds, no camera
+  python soundscope.py listen --assist --name Keith        mics-only sound awareness with alerts
   python soundscope.py budget                              today's estimated Meta spend
 
 The viewer (scope.py) and the arm app (arm_follow.py --memory) write the same memory, in
@@ -144,14 +145,22 @@ def cmd_budget(args):
     print(json.dumps(Budget().summary(), indent=1))
 
 
+def alert_tone():
+    try:
+        import winsound
+        winsound.Beep(1320, 200)
+    except (ImportError, RuntimeError):
+        print('\a', end='', flush=True)
+
+
 def cmd_listen(args):
     """Mic-only logging: every sound goes to memory with its direction (relative to the camera's
     position in the mount profile, or to the array when no camera is set up)."""
     from arm_follow import Listener
-    from insight import FEATURES, Enricher
+    from insight import ASSIST_WATCH, FEATURES, Enricher
     cfg = aim.load_config(profile=args.mount)
     memory = sound_memory.Memory()
-    meta = get_meta(args) if args.meta else None
+    meta = get_meta(args) if args.meta or args.assist else None
     references = sound_memory.ReferenceBank()
     enricher = None
     if meta is not None or references.items:
@@ -162,13 +171,19 @@ def cmd_listen(args):
             elif kind == 'captions':
                 for turn in payload:
                     print(f"  {turn['name']} ({turn['where']}): {turn['text']}")
+                    called = sound_memory.name_called(turn['text'], args.name)
+                    if called:
+                        print(f"  ALERT: {turn['name']} said \"{called}\" ({turn['where']})")
+                        alert_tone()
             elif kind == 'alert':
-                print(f"  ALERT: {payload['watch']} ({payload['how']})")
+                where = (rec or {}).get('where', {}).get('words', '')
+                print(f"  ALERT: {payload['watch']}" + (f' ({where})' if where else '') + f" [{payload['how']}]")
+                alert_tone()
             elif rec is not None and kind in ('identify', 'label'):
                 print('  -> ' + sound_memory.phrase(rec))
         features = set(FEATURES) - {'context', 'outline'} if meta is not None else set()
         enricher = Enricher(memory, meta, features, on_result=show, references=references)
-        enricher.watch = list(args.watch or [])
+        enricher.watch = list(ASSIST_WATCH if args.assist else []) + list(args.watch or [])
         enricher.start()
     inbox = queue.Queue()
     listener = Listener(inbox.put, updates=True, threshold_db=cfg.get('listen', {}).get('threshold_db', 0.5))
@@ -241,6 +256,8 @@ def main():
     s.add_argument('--mount', choices=sorted(aim.profiles()))
     s.add_argument('--meta', action='store_true', help='label sounds and caption speech with Meta models')
     s.add_argument('--watch', action='append', help='alert when this sound happens (repeatable)')
+    s.add_argument('--assist', action='store_true', help='sound awareness: Meta labels + captions + household alerts')
+    s.add_argument('--name', action='append', help='alert when someone says this name')
     s.add_argument('--seconds', type=float)
     args = p.parse_args()
     load_env(ENV_FILE)

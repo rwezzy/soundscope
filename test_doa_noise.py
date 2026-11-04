@@ -66,6 +66,21 @@ class SteadyNoiseAfterCalibration(unittest.TestCase):
             self.assertLess(r['seconds'], 2.0)
         self.assertFalse(any(r['seconds'] > 6.0 for _, r in found), 'the heater became one endless sound')
 
+    def test_a_sound_that_never_stops_is_still_reported(self):
+        rng = np.random.default_rng(8)
+        n = int(20 * FS)
+        x = rng.standard_normal((n, 4)) * 1e-3
+        hum = band_limit(rng.standard_normal(n - FS), 300, 3000)
+        hum *= np.sqrt(1e-6 * 10 ** (12 / 10) / np.mean(hum ** 2))
+        x[FS:] += plane_wave(hum, unit(-30, 0), n - FS + FS)[:n - FS]
+        loc = Localizer()
+        loc.calibrate(x[:FS])
+        tracker = Tracker(loc, threshold_db=1.5, min_window_s=60.0)  # floor tracking off: only the cap acts
+        ends = [out[1] for out in (tracker.push(frame) for frame in loc.stft(x)) if out and out[0] == 'end']
+        self.assertGreaterEqual(len(ends), 2)
+        self.assertTrue(all(r['seconds'] <= 8.05 for r in ends))
+        self.assertEqual(ends[0].get('final_reason'), 'max_length')
+
     def test_quiet_room_behaviour_is_unchanged(self):
         found = events(room(heater_db=-99.0))
         self.assertEqual(len([1 for t, _ in found if 6.5 <= t <= 11.5]), 2)
