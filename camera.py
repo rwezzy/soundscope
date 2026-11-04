@@ -3,12 +3,37 @@
 Same SDK calls as Meta_Hack's tools/gemini_capture.py. Plug the camera straight into a USB 3
 port and close Orbbec Viewer first.
 """
+import os
+import subprocess
+
 import cv2
 import numpy as np
+
+ORBBEC_USB_VENDOR = 'VID_2BC5'  # Gemini 2 datasheet: VID/PID 0x2BC5/0x0670
+
+
+def camera_connected():
+    """True/False on Windows (is any Orbbec USB device present?); None when it cannot be checked.
+
+    The Orbbec SDK crashes the whole process (heap corruption, no Python error) when it starts with no
+    camera attached (seen Nov 4), so the viewer asks Windows first. SOUNDSCOPE_SKIP_CAMERA_CHECK=1 skips it.
+    """
+    if os.name != 'nt' or os.environ.get('SOUNDSCOPE_SKIP_CAMERA_CHECK') == '1':
+        return None
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-Command',
+                              f"@(Get-PnpDevice -PresentOnly | Where-Object {{ $_.InstanceId -match '{ORBBEC_USB_VENDOR}' }}).Count"],
+                             capture_output=True, text=True, timeout=15).stdout.strip()
+        return int(out.splitlines()[-1]) > 0 if out else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 class Gemini:
     def __init__(self, size=(1280, 720)):
+        if camera_connected() is False:
+            raise SystemExit('No Orbbec camera is plugged in (Windows sees no Orbbec USB device). Plug the Gemini 2 '
+                             'into a USB 3 port, or use the mics alone: python soundscope.py listen --assist')
         import pyorbbecsdk as sdk
         self.sdk = sdk
         sdk.Context.set_logger_level(sdk.OBLogLevel.NONE)

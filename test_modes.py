@@ -91,6 +91,16 @@ class Wrist(unittest.TestCase):
             scope.run(SimpleNamespace(no_heatmap=False, diagnostics=False), cfg)
 
 
+class MissingCamera(unittest.TestCase):
+    def test_unplugged_camera_is_reported_instead_of_crashing(self):
+        import camera
+        with mock.patch.object(camera, 'camera_connected', return_value=False), self.assertRaises(SystemExit) as stop:
+            camera.Gemini()
+        self.assertIn('soundscope.py listen', str(stop.exception))
+        with mock.patch.dict('os.environ', {'SOUNDSCOPE_SKIP_CAMERA_CHECK': '1'}):
+            self.assertIsNone(camera.camera_connected())
+
+
 class Viewer(unittest.TestCase):
     def setUp(self):
         printer = mock.patch('builtins.print')
