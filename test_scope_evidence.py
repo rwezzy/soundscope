@@ -17,6 +17,17 @@ from test_scope import K, RIGHT_BOX, heard_from, render, scope_config
 
 
 class Evidence(unittest.TestCase):
+    def test_ambiguous_global_peak_does_not_force_offscreen_arrow(self):
+        scores=np.zeros((10,10));scores[4:6,4:6]=.5
+        ev={'observed_at':time.monotonic(),'fix':{'direction':[0,1,0],'evidence':[None,None],
+            'z':30,'coherence':.5,'directional_ambiguous':True}}
+        loc=mock.Mock()
+        with mock.patch.object(scope,'off_screen',return_value=('above',45)), mock.patch.object(scope,'score_view',
+                return_value=(scores,*np.meshgrid(np.arange(10),np.arange(10)),np.ones((10,10,3)),np.ones((10,10),bool))):
+            view=scope.make_view(ev,False,loc,np.ones((10,10)),{},scope_config())
+        self.assertNotIn('off_screen',view)
+        self.assertEqual(view['quality']['state'],'ambiguous')
+
     def test_camera_timeout_does_not_drop_drained_completed_report(self):
         reports=queue.Queue();reports.close=mock.Mock()
         reports.put({'kind':'ready'})

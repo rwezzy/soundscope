@@ -5,7 +5,7 @@
   python scope.py --record demo.mp4          also save the annotated video
 
 Keys: C = three-position calibration, Enter = apply, Esc = cancel,
-H = heat map, D = diagnostics, Space = pause, S = evidence snapshot, Q = quit.
+H = heat map, P = palette, D = diagnostics, Space = pause, S = evidence snapshot, Q = quit.
 
 Visible 3D points are scored against the four microphones. The support region is a
 candidate, not a confirmed source. A depth contour is available in diagnostics.
@@ -167,7 +167,7 @@ def make_view(ev, final, loc, depth_mm, k, cfg, rig=None):
     view = {'time': ev.get('observed_at', time.monotonic()), 'final': final, 'fix': fix,
             'event_id': ev.get('event_id'), 'expires_after': MAX_AGE_S}
     away = off_screen(fix['direction'], cfg, k, depth_mm.shape, rig=rig)
-    if away:
+    if away and not fix.get('directional_ambiguous',False):
         view['off_screen'] = away
         strong = fix.get('z', 0) >= 12 and fix.get('coherence', 0) >= 0.10
         view['quality'] = {'state': 'candidate' if strong else 'weak',
@@ -248,7 +248,7 @@ def summary(view):
     if 'off_screen' in view:
         edge, angle = view['off_screen']
         return f'{quality}: direction {angle:.0f} deg {edge}; source unverified'
-    distance = f"{np.linalg.norm(view['point']):.2f} m" if view['measured'] else 'unknown'
+    distance = f"{np.linalg.norm(view['point']):.2f} m" if view['measured'] and quality == 'candidate' else 'unresolved'
     text = f"{quality}: candidate surface {distance}; {view['quality']['reason']}"
     if view.get('show_reach') and 'reach' in view:
         inside, radius = view['reach']
@@ -310,6 +310,8 @@ class CalibrationController:
         now = time.monotonic() if now is None else now
         if ev is None or not 0 <= now - ev.get('observed_at', -float('inf')) <= 0.75:
             return 'No fresh sound: keep the source still and playing while you click it.'
+        if ev['fix'].get('directional_ambiguous',False):
+            return 'Direction is ambiguous. Try a varied ringtone or short broadband sound; calibration has not changed.'
         event_id = ev.get('event_id')
         if event_id is None or event_id in self.used_events:
             return 'Pause the sound for a second, move it, then play a new sound and click again.'
@@ -511,6 +513,7 @@ def run(args, cfg, bridge=None, rig=None):
     shape, click = None, None
     view, latest, meta_worker, evidence_frame = None, None, None, None
     heatmap, diagnostics, paused = not args.no_heatmap, args.diagnostics, False
+    palette,opacity=scope_ui.validate_heatmap_style(getattr(args,'palette','amber'),getattr(args,'heatmap_opacity',.44))
     pause_time, held = None, None
     viewport = initial_viewport()
     displayed_viewport = None
@@ -588,6 +591,7 @@ def run(args, cfg, bridge=None, rig=None):
                     last_timestamp = ev['observed_at']
                     final = ev['kind'] == 'sound'
                     view = make_view(ev, final, loc, depth, k, cfg, rig=rig)
+                    if bridge is not None:bridge.record_diagnostic(ev,view,rig,cfg)
                     evidence_frame = (frame.copy(), depth.copy(), dict(k), now)
                     view['show_reach'] = args.reach
                     if final or now - ui.get('printed', 0) > 1:
@@ -612,10 +616,13 @@ def run(args, cfg, bridge=None, rig=None):
                 click = None
             if displayed_viewport is not None:
                 viewport = window_viewport(viewport)
+            if bridge is not None:
+                display=bridge.display_settings()
+                heatmap,palette,opacity=display['heatmap'],display['heatmap_palette'],display['heatmap_opacity']
             out = draw(frame, view, args.target, ui['note'], now=pause_time if paused else now,
                        fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
-                       viewport_size=viewport)
+                       viewport_size=viewport,heatmap_palette=palette,heatmap_opacity=opacity)
             cv2.imshow(WINDOW, out)
             if bridge is not None:
                 bridge.publish_frame(out, paused=paused)
@@ -647,6 +654,11 @@ def run(args, cfg, bridge=None, rig=None):
                     say(ui, f'Could not save calibration: {exc}')
             elif key == ord('h'):
                 heatmap = not heatmap
+                if bridge is not None:bridge.set_display({'heatmap':heatmap})
+            elif key == ord('p'):
+                palette=scope_ui.HEATMAP_PALETTES[(scope_ui.HEATMAP_PALETTES.index(palette)+1)%len(scope_ui.HEATMAP_PALETTES)]
+                if bridge is not None:bridge.set_display({'heatmap_palette':palette})
+                say(ui,f'Heatmap palette: {palette}. Display only; acoustic estimates unchanged.')
             elif key == ord('d'):
                 diagnostics = not diagnostics
             elif key == ord(' '):
@@ -687,6 +699,8 @@ def main():
     p.add_argument('--seconds', type=float, help='stop after this long')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
+    p.add_argument('--palette',choices=scope_ui.HEATMAP_PALETTES,default='amber')
+    p.add_argument('--heatmap-opacity',type=float,default=.44,help='Maximum overlay opacity, 0..0.85')
     p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
     p.add_argument('--env-file', help='also load keys from this .env file')
     args = p.parse_args()

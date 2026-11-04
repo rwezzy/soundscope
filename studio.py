@@ -19,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 import uuid
 import wave
+import scope_ui
+from telemetry import Telemetry
 
 import cv2
 import numpy as np
@@ -86,10 +88,12 @@ class Studio:
         self.media = OrderedDict()  # Last twenty event clips/snapshots, RAM only.
         self.seen = set()
         self.session = uuid.uuid4().hex[:8]
+        self.telemetry = Telemetry(self.path/'diagnostics.sqlite3')
         self.lock = threading.RLock()
         self.jpeg = None
         self.frame_at = None
         self.paused = False
+        self.display = dict(heatmap=True, heatmap_palette='amber', heatmap_opacity=.44)
         self.jobs = OrderedDict()
         self.queue = queue.Queue(maxsize=3)
         self.stop = threading.Event()
@@ -109,6 +113,23 @@ class Studio:
     def accept_event(self, ev):
         return self.mode != 'wrist' or (self.stable and ev.get('onset_at', -math.inf) >= self.motion.unstable_at + self.motion.settle_s)
 
+    def set_display(self, settings):
+        if not isinstance(settings,dict) or set(settings)-set(self.display):
+            raise ValueError('Unknown display setting')
+        with self.lock:
+            updated=dict(self.display,**settings)
+            if type(updated['heatmap']) is not bool:raise ValueError('heatmap must be boolean')
+            palette,opacity=scope_ui.validate_heatmap_style(updated['heatmap_palette'],updated['heatmap_opacity'])
+            updated.update(heatmap_palette=palette,heatmap_opacity=opacity)
+            self.display=updated
+            return dict(updated)
+
+    def display_settings(self):
+        with self.lock:return dict(self.display)
+
+    def record_diagnostic(self, event, view, rig, cfg):
+        self.telemetry.add(self.session,event,view,rig,cfg)
+
     def observe(self, ev, view, frame, now, cfg, rig, frame_at=None, pairing_reason=None):
         ident = f'{self.session}-{ev.get("event_id", ev["observed_at"])}'
         with self.lock:
@@ -119,11 +140,14 @@ class Studio:
                 self.seen = {ident}
         direction = np.asarray(rig.array_direction_to_camera(ev['fix']['direction']), float)
         has_frame = frame is not None
-        point = view.get('point') if has_frame and view.get('measured') and view['quality']['state'] != 'weak' else None
+        point = view.get('point') if has_frame and view.get('measured') and view['quality']['state'] == 'candidate' else None
         if not has_frame:
             frame_at = None
         timestamp = datetime.fromtimestamp(time.time()-(now-ev['observed_at']), timezone.utc).isoformat()
         event = dict(id=ident, timestamp=timestamp, mode='wrist' if self.mode == 'wrist' else 'standalone',
+            quality_reason=view['quality'].get('reason'),
+            directional_support_radius_deg=ev['fix'].get('directional_support_radius_deg'),
+            directional_ambiguous=ev['fix'].get('directional_ambiguous'),
             label='unidentified sound', label_source='unknown', acoustic_description=waveform_description(ev.get('wav')),
             quality=view['quality']['state'], bearing_deg=float(np.degrees(np.arctan2(direction[0],direction[2]))),
             elevation_deg=float(np.degrees(np.arctan2(-direction[1],np.hypot(direction[0],direction[2])))),
@@ -173,6 +197,7 @@ class Studio:
                 frame_age_s=None if self.frame_at is None else round(time.monotonic()-self.frame_at,2),
                 jobs=[dict(job) for job in list(self.jobs.values())[-6:]], token=self.token,
                 robot='Preview only; no robot connection or motion', media_ids=list(self.media),
+                display=dict(self.display), palettes=list(scope_ui.HEATMAP_PALETTES),
                 media_available={ident:{'audio':bool(media.get('wav')),'image':bool(media.get('jpeg'))}
                                  for ident,media in self.media.items()})
         # Never hold the frame/media lock while querying another subsystem.
@@ -269,6 +294,7 @@ class Studio:
         return RobotPreview(self.rig).plan(mapped,pose_packet=pose,now=time.monotonic())
 
     def close(self):
+        self.telemetry.close()
         self.stop.set();self.worker.join(timeout=2)
         # Do not close SQLite underneath a bounded in-flight network worker.
         if not self.worker.is_alive():
@@ -323,6 +349,8 @@ def serve(studio,port):
                         if (w.getframerate(),w.getnchannels(),w.getsampwidth())!=(16000,1,2) or w.getnframes()>16000*10:
                             raise ValueError('Voice input must be at most 10 seconds of 16kHz mono PCM16 WAV')
                     result=studio.submit('voice',wav=body)
+                elif self.path=='/api/display':
+                    return self.send(200,studio.set_display(json.loads(body)))
                 elif self.path=='/api/action':
                     obj=json.loads(body)
                     if not isinstance(obj,dict):raise ValueError('Expected a JSON object')
@@ -350,7 +378,13 @@ def demo(studio,seconds=None):
         cv2.drawMarker(frame,(x,285),(80,190,255),cv2.MARKER_CROSS,22,2)
         cv2.putText(frame,'SYNTHETIC DEMO | no camera, microphone or Meta calls',(30,45),cv2.FONT_HERSHEY_SIMPLEX,.65,(100,215,245),1,cv2.LINE_AA)
         cv2.putText(frame,'Acoustic candidate / visible surface, source not verified',(30,493),cv2.FONT_HERSHEY_SIMPLEX,.6,(215,210,200),1,cv2.LINE_AA)
-        studio.publish_frame(frame)
+        yy,xx=np.mgrid[0:540:8,0:960:8]
+        scores=np.exp(-((xx-x)**2+(yy-285)**2)/(2*65**2))
+        view=dict(time=time.monotonic(),scores=scores,support_mask=scores>=.8,
+                  quality={'state':'candidate','reason':'Synthetic display example; no sensor measurement.'},
+                  fix={'z':20,'coherence':.8,'snr_db':14})
+        studio.publish_frame(scope_ui.render(frame,view,None,'SYNTHETIC DEMO. No microphone, camera or paid calls.',
+                             viewport_size=(1120,700),**studio.display_settings()))
         if i!=last:
             last=i;ident=f'{studio.session}-demo-{i}'
             labels=['ringing tone','keys jingling','broadband sound']

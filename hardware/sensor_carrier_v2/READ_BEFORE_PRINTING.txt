@@ -1,0 +1,40 @@
+SOUNDSCOPE SENSOR CARRIER v2 — STATIONARY TRIPOD ASSEMBLY
+
+Use PRINT_ON_SV06.txt for the supplied complete twelve-part SV06 PLA project.
+Physical fit, printed-thread function, grip, actual USB plugs and tripod
+stability remain unverified. This is not a wrist or moving-robot mount.
+Do not substitute metal screws in the custom printed threads.
+ASSEMBLY ON THE BENCH
+1. Unplug both sensors. Keep the camera supported on a soft surface. Remove
+   it from its tripod while fitting the surrounding carrier.
+2. Slide the two SQUARE PRINTED NUTS into the front-opening pockets at the
+   top of the camera frame. Each screw hole points up/down, not toward the lens.
+3. With the pressure bar removed, fit the camera into the lower curved seats.
+   The narrow side-band front edge sits about 6 mm behind the camera's front
+   face. The wide rear heatsink/USB shoulders remain behind the clamp band.
+   Do not push the holder back until it catches the rear USB shoulders.
+4. Place the pressure bar over the camera, profiled face toward its housing.
+   Feed the two LONG PRINTED screws downward through the roof nuts until
+   their tips meet the bar's shallow cups. Alternate small finger turns only
+   until the camera does not wiggle. No pliers, wrench or metal substitute.
+5. While supporting the camera over padding, gently check left/right, up/down
+   and fore/aft movement. The fore/aft hold relies on clamp friction. If it
+   slides, do not keep adding force: the contact fit needs revision.
+6. Reattach the original tripod directly to the CAMERA's original threaded
+   hole. The print does not go between the tripod head and camera. Check that
+   the tripod head fits the 60 mm-wide open underside and spreads stably.
+7. Rest the mic PCB on its three rim supports, main USB edge UP and LED /
+   microphone-inlet side forward, the same direction the camera looks.
+   Retainer 1 goes upper right, 2 upper left, 3 lower left. Each curved tongue
+   points toward the board centre. Fit the three SHORT PRINTED screws from
+   the front, through the retainer holes into the printed frame bosses.
+   Tighten gently until play stops; the bare board must stay flat.
+8. Connect both USB leads. The camera has rear-open, sloping side notches for
+   its plug body. The mic's main upper USB and rear components remain open.
+   Your actual cable overmolds have not been measured: dry-fit both plugs
+   without force and arrange slack so cables cannot pull or tip the tripod.
+
+BEFORE USING SOUNDSCOPE
+This changes the relative sensor positions. Redo microphone-to-camera
+calibration after the devices are rigidly secured. Do not reuse the old offsets
+and assume the print automatically updates them. No software config was changed.

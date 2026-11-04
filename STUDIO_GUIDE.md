@@ -47,6 +47,19 @@ also stops it. Only one instance should use the devices at a time.
 If the server stops, the browser labels the feed **DISCONNECTED**, keeps the
 last good image frozen and disables model actions.
 
+Below the browser video, **Colors** selects cyan/amber, Turbo, Viridis or Inferno.
+**Strength** changes overlay opacity; the checkbox hides the heatmap. These are
+local display controls, use no model credits, and do not change acoustic scores.
+In the OpenCV window, **P** cycles palettes and **H** toggles the heatmap.
+The standalone viewer also accepts `--palette inferno --heatmap-opacity 0.65`.
+
+An elongated vertical region or competing directions now reports **ambiguous**
+even when the peak score is high. It cannot supply a precise range, robot target
+or SAM point. These conservative tests expose uncertainty; they do not correct
+bad calibration, reflections or a wrong microphone layout. The thresholds are
+heuristics, not measured probabilities. Calibration rejects globally ambiguous
+samples; a varied ringtone or broadband sound is preferable to a single pure tone.
+
 ## Search and descriptions
 
 Local search uses sound concepts/synonyms plus time, direction and level filters.
@@ -206,6 +219,14 @@ The last twenty event audio clips and camera snapshots live in RAM only and
 expire on exit. Metadata and returned transcripts/context can still be personal
 data. The data folders are Git-ignored. Selected media is sent to Meta only for
 an explicitly requested model action. The server binds to localhost.
+
+`studio_data/live/diagnostics.sqlite3` additionally retains the latest 5,000
+numerical viewer updates across runs: timing, acoustic scores, direction,
+uncertainty and the sensor transform/configuration used. No audio, image,
+transcript or API key is included. These diagnostics remain local and are never
+automatically uploaded. Ordinary history cannot replay a past sound after exit;
+press **S** in the OpenCV window to explicitly retain a local image/evidence
+snapshot when a particular failure occurs.
 
 The integrated offline suite can be run without devices or paid calls:
 

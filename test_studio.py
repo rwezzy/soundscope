@@ -112,6 +112,31 @@ class StudioIntegration(unittest.TestCase):
         self.assertEqual(instance.meta.calls,[])
         self.net.assert_not_called()
 
+    def test_display_controls_are_validated_local_and_free(self):
+        instance=self.make();port=self.server(instance)
+        headers={'X-SoundScope-Token':instance.token}
+        code,_=self.request(port,'/api/display','POST',json.dumps({'heatmap_palette':'inferno','heatmap_opacity':.7}),headers)
+        self.assertEqual(code,200)
+        self.assertEqual(instance.status()['display']['heatmap_palette'],'inferno')
+        code,_=self.request(port,'/api/display','POST',json.dumps({'heatmap_opacity':9}),headers)
+        self.assertEqual(code,400)
+        self.assertEqual(instance.display_settings()['heatmap_opacity'],.7)
+        code,_=self.request(port,'/api/display','POST',json.dumps({'heatmap':False}))
+        self.assertEqual(code,403)
+        self.assertTrue(instance.display_settings()['heatmap'])
+        self.assertEqual(instance.meta.calls,[])
+
+    def test_ambiguous_event_cannot_supply_precise_point_or_sam_prompt(self):
+        instance=self.make(enable_meta=True)
+        now=time.monotonic()
+        event={'event_id':5,'observed_at':now,'fix':{'direction':[0,0,1],'directional_ambiguous':True}}
+        view={'quality':{'state':'ambiguous'},'point':np.array([0,0,1]),'measured':True,'spot':(10,10)}
+        instance.observe(event,view,np.zeros((30,40,3),np.uint8),now,{},RigGeometry(np.eye(4)))
+        saved=instance.store.get(f'{instance.session}-5')
+        self.assertIsNone(saved['pixel']);self.assertIsNone(saved['range_m'])
+        with self.assertRaisesRegex(ValueError,'No valid acoustic'):
+            instance.submit('segment',event_id=saved['id'])
+
     def test_frozen_snapshot_and_wav_stay_with_the_selected_event(self):
         instance=self.make(enable_meta=True)
         first,ev,frame=self.observe(instance,color=(0,0,220))

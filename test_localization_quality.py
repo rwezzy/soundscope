@@ -35,6 +35,36 @@ class LocalizationQuality(unittest.TestCase):
         self.assertGreater(quality['support_fraction'], 0.15)
         self.assertTrue(support[20, 20])
 
+    def test_tall_thin_ridge_does_not_claim_resolved_height(self):
+        scores = np.zeros((90, 160))
+        scores[:, 79:81] = .7
+        quality, support = assess(scores, self.fix)
+        self.assertEqual(quality['state'], 'ambiguous')
+        self.assertIn('height', quality['reason'])
+        self.assertEqual(quality['vertical_span_fraction'], 1.)
+        self.assertLess(quality['support_fraction'], .02)
+        self.assertTrue(support.any())
+
+    def test_wide_thin_ridge_does_not_claim_resolved_bearing(self):
+        scores = np.zeros((90, 160))
+        scores[44:46, :] = .7
+        quality, _ = assess(scores, self.fix)
+        self.assertEqual(quality['state'], 'ambiguous')
+        self.assertIn('bearing', quality['reason'])
+        self.assertEqual(quality['horizontal_span_fraction'], 1.)
+
+    def test_camera_crop_cannot_hide_whole_hemisphere_ambiguity(self):
+        fix = dict(self.fix, directional_ambiguous=True,
+                   directional_reason='Comparable directions outside the crop.')
+        quality, _ = assess(self.gaussian(), fix)
+        self.assertEqual(quality['state'], 'ambiguous')
+        self.assertIn('outside', quality['reason'])
+
+    def test_axis_fraction_must_be_valid(self):
+        for fraction in (0, -1, 1.1, float('nan')):
+            with self.subTest(fraction=fraction), self.assertRaises(ValueError):
+                assess(self.gaussian(), self.fix, max_axis_fraction=fraction)
+
     def test_broad_dome_is_not_sharpened_by_median_subtraction(self):
         quality, _ = assess(self.gaussian(sigma=30), self.fix)
         self.assertEqual(quality['state'], 'ambiguous')

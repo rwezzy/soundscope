@@ -47,15 +47,19 @@ def monitor(port, stop, samples):
         stop.wait(2)
 
 
-def summarize(samples, event_count, elapsed, error=None):
+def summarize(samples, event_count, elapsed, error=None, requested_seconds=None):
     ready=[s for s in samples if s.get('frame_age_s') is not None]
     healthy=[s for s in ready if not s.get('error') and s.get('jpeg_valid')
              and 0<=s['frame_age_s']<=2 and s.get('retained_media',999)<=20]
     no_meta=all(not s.get('meta_enabled') and s.get('meta_calls',0)==0 for s in samples)
     fraction=len(healthy)/len(ready) if ready else 0
     latencies=[s['http_roundtrip_ms'] for s in healthy]
+    observed_span=max((s['at'] for s in ready),default=0)-min((s['at'] for s in ready),default=0)
+    completed=requested_seconds is None or observed_span>=max(0,requested_seconds-4)
     return dict(kind='passive hardware integration check',duration_s=elapsed,
-                passed=error is None and len(ready)>=5 and fraction>=.95 and no_meta,
+                passed=error is None and len(ready)>=5 and fraction>=.95 and no_meta and completed,
+                requested_capture_s=requested_seconds,observed_capture_span_s=observed_span,
+                requested_duration_completed=completed,
                 runtime_error=error,samples=len(samples),ready_samples=len(ready),
                 healthy_fraction=fraction,history_events=event_count,
                 meta_attempts=max((s.get('meta_calls',0) for s in samples),default=0),
@@ -92,7 +96,7 @@ def main():
     finally:
         stop.set()
         if worker:worker.join(timeout=7)
-        report=summarize(samples,len(app.store.list_events(limit=500)),time.monotonic()-started,failure)
+        report=summarize(samples,len(app.store.list_events(limit=500)),time.monotonic()-started,failure,args.seconds)
         report['meta_attempts']=app.meta.status()['calls_used']
         report['meta_disabled']=not app.meta.status()['enabled']
         report['passed']=report['passed'] and report['meta_attempts']==0 and report['meta_disabled']

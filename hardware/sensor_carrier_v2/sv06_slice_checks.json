@@ -1,0 +1,16 @@
+{
+  "printer": "Sovol SV06 0.4 mm",
+  "filament": "PLA",
+  "estimated_time": "3h 30m 29s",
+  "grams": 31.4,
+  "first_layer_xy_bounds_mm": [
+    3.058,
+    3.348,
+    216.943,
+    216.602
+  ],
+  "slice_warnings": [],
+  "loaded_project_without_external_config": true,
+  "project_sha256": "17bf12d62de53929c77875c0f655c5ba55782afbc57462502779fdb9e2b27654",
+  "physical_fit_tested": false
+}

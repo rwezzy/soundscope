@@ -1,0 +1,257 @@
+{
+  "file": "FULL_CARRIER_SV06_220MM.stl",
+  "sha256": "806324544763acf5ee2ed7db784b694c10e7c56aa8406126dc258c7d4140cf49",
+  "part_count": 12,
+  "bounds_mm": [
+    205.39999389648438,
+    204.81961059570312,
+    22.799999237060547
+  ],
+  "footprint_with_3mm_outer_brim_mm": [
+    211.39999389648438,
+    210.81961059570312
+  ],
+  "bed_mm": [
+    220,
+    220
+  ],
+  "fits_with_3mm_outer_brim": true,
+  "scale_percent": 100,
+  "packing_only": true,
+  "physical_fit_tested": false,
+  "source_parts": [
+    {
+      "source_file": "01_shared_frame.stl",
+      "source_sha256": "649c26870dc9823789c788064ae1b05ce6d152c945d9ee25c9f6a7ce09c14911",
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        111.0,
+        180.72947692871094,
+        16.0
+      ],
+      "volume_mm3": 17192.375656315922,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "02_camera_pressure_bar.stl",
+      "source_sha256": "0a3527b4624ffd8d8c8163e6aa017834e1cba7d48fb531720e1bc1bbeab239ae",
+      "translation_mm": [
+        116.0,
+        0.0,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        68.0,
+        5.834994792938232,
+        13.0
+      ],
+      "volume_mm3": 2699.4100313692447,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "03_camera_screw_20mm_PRINT_TWO.stl",
+      "source_sha256": "0ee46226a972a19d7a6830940fd2ee8d060b8dd44a7cdc20a87217ecdf8da3d0",
+      "translation_mm": [
+        189.0,
+        0.0,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.399999618530273,
+        14.738716125488281,
+        22.799999237060547
+      ],
+      "volume_mm3": 1309.096490910764,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "03_camera_screw_20mm_PRINT_TWO.stl",
+      "source_sha256": "0ee46226a972a19d7a6830940fd2ee8d060b8dd44a7cdc20a87217ecdf8da3d0",
+      "translation_mm": [
+        0.0,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.399999618530273,
+        14.738716125488281,
+        22.799999237060547
+      ],
+      "volume_mm3": 1309.096490910764,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "04_camera_nut_PRINT_TWO.stl",
+      "source_sha256": "988932ee5c8556e2b0ac1458b9ff6c2c7771bbdfc7651510ea1e97f48161d770",
+      "translation_mm": [
+        21.399999618530273,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        14.0,
+        14.0,
+        6.0
+      ],
+      "volume_mm3": 887.6936349877247,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "04_camera_nut_PRINT_TWO.stl",
+      "source_sha256": "988932ee5c8556e2b0ac1458b9ff6c2c7771bbdfc7651510ea1e97f48161d770",
+      "translation_mm": [
+        40.39999961853027,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        14.0,
+        14.0,
+        6.0
+      ],
+      "volume_mm3": 887.6936349877247,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "05_mic_retainer_1.stl",
+      "source_sha256": "fb135bf0cd573ffc5cf31dfbde8e4bd4bdf5635f258b6045f846e6436f4ad29e",
+      "translation_mm": [
+        59.39999961853027,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.735252380371094,
+        19.090126037597656,
+        2.4000000953674316
+      ],
+      "volume_mm3": 297.7385531472224,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "06_mic_retainer_2.stl",
+      "source_sha256": "ef0336a2cc83ded99804615f494cce8e9f066d90cf39ab2739d8458127bbebbf",
+      "translation_mm": [
+        81.13525199890137,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        15.864434242248535,
+        17.942657470703125,
+        2.4000000953674316
+      ],
+      "volume_mm3": 269.81195145117323,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "07_mic_retainer_3.stl",
+      "source_sha256": "537d19cd10d42f189f0f6c6079f85cf91c49bb961eca94a9da1aa3cecd1794e9",
+      "translation_mm": [
+        101.9996862411499,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        14.878506660461426,
+        18.759584426879883,
+        2.4000000953674316
+      ],
+      "volume_mm3": 297.71559932555994,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "08_mic_screw_14mm_PRINT_THREE.stl",
+      "source_sha256": "1e842aeb616587a2af70bf643d4586611a1758dfa03b0496ed29603fdbccdb17",
+      "translation_mm": [
+        121.87819290161133,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.399999618530273,
+        14.738716125488281,
+        16.799999237060547
+      ],
+      "volume_mm3": 1063.1657450941254,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "08_mic_screw_14mm_PRINT_THREE.stl",
+      "source_sha256": "1e842aeb616587a2af70bf643d4586611a1758dfa03b0496ed29603fdbccdb17",
+      "translation_mm": [
+        143.2781925201416,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.399999618530273,
+        14.738716125488281,
+        16.799999237060547
+      ],
+      "volume_mm3": 1063.1657450941254,
+      "unchanged_geometry": true
+    },
+    {
+      "source_file": "08_mic_screw_14mm_PRINT_THREE.stl",
+      "source_sha256": "1e842aeb616587a2af70bf643d4586611a1758dfa03b0496ed29603fdbccdb17",
+      "translation_mm": [
+        164.67819213867188,
+        185.72947692871094,
+        0.0
+      ],
+      "scale": 1.0,
+      "rotation": "none",
+      "dimensions_mm": [
+        16.399999618530273,
+        14.738716125488281,
+        16.799999237060547
+      ],
+      "volume_mm3": 1063.1657450941254,
+      "unchanged_geometry": true
+    }
+  ],
+  "round_trip_component_volumes_mm3": [
+    269.8117872700274,
+    297.71546283762524,
+    297.73847180936264,
+    887.6936409759875,
+    887.6938072851772,
+    1063.1657965192187,
+    1063.165830681756,
+    1063.165851916323,
+    1309.0965256118175,
+    1309.096588588235,
+    2699.4100362185795,
+    17192.375656315915
+  ],
+  "volume_mm3": 28340.12945603003,
+  "watertight": true,
+  "manifold_status": "Error.NoError"
+}

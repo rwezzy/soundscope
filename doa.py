@@ -122,11 +122,26 @@ class Localizer:
             return None
         srp = np.take_along_axis(self.gcc(C, W), self.lag_idx, axis=1).mean(axis=0)
         k = int(np.argmax(srp))
-        # How far the map would wander if every phase were random; z says how sure the peak is.
+        # A high coherent peak need not be unique (especially for a narrow tone).
+        # Keep the estimate unchanged, but expose support across the WHOLE
+        # hemisphere before a camera crop can hide a competing direction.
+        # 90% of a positive raw peak and a 20 degree radius are conservative
+        # display heuristics, not a calibrated probability or error bound.
+        support = srp >= .9 * srp[k] if srp[k] > 0 else np.zeros(srp.shape, bool)
+        radius = (float(np.degrees(np.arccos(np.clip(
+            np.min(self.dirs[support] @ self.dirs[k]), -1., 1.)))) if support.any() else 180.)
+        ambiguous = radius > 20.
+        # Peak contrast under a simplified random-phase noise model. A high z
+        # is not proof of a unique direction, calibrated confidence or identity.
         sigma = np.sqrt(W2.sum() / 2 / len(self.pairs)) / total
         return {'azimuth': float(self.az[k]), 'elevation': float(self.el[k]),
                 'direction': self.dirs[k], 'coherence': float(srp[k]),
-                'z': float((srp[k] - np.median(srp)) / sigma)}
+                'z': float((srp[k] - np.median(srp)) / sigma),
+                'directional_support_radius_deg': radius,
+                'directional_support_level': .9,
+                'directional_ambiguous': ambiguous,
+                'directional_reason': ('Comparable acoustic directions span more than 20 degrees from the peak; direction is ambiguous.'
+                                       if ambiguous else 'Angular support is compact; source remains unverified.')}
 
     def locate_clip(self, x):
         """Direction of the sound in a recording (samples, mics), using every frame above the floor."""

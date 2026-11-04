@@ -5,7 +5,7 @@ from live_check import summarize
 
 class PassiveCheckReport(unittest.TestCase):
     def sample(self,**changes):
-        return dict(frame_age_s=.1,jpeg_valid=True,retained_media=20,
+        return dict(at=0,frame_age_s=.1,jpeg_valid=True,retained_media=20,
                     meta_enabled=False,meta_calls=0,http_roundtrip_ms=20,**changes)
 
     def test_no_events_can_pass_transport_but_cannot_claim_accuracy(self):
@@ -24,6 +24,13 @@ class PassiveCheckReport(unittest.TestCase):
 
     def test_startup_samples_are_not_mistaken_for_healthy_frames(self):
         self.assertFalse(summarize([{'frame_age_s':None}]*10,0,30)['passed'])
+
+    def test_early_viewer_close_does_not_pass_requested_duration(self):
+        samples=[dict(self.sample(),at=i*2) for i in range(10)]
+        result=summarize(samples,8,25,requested_seconds=45)
+        self.assertFalse(result['passed'])
+        self.assertFalse(result['requested_duration_completed'])
+        self.assertEqual(result['observed_capture_span_s'],18)
 
 
 if __name__=='__main__':unittest.main()

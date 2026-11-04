@@ -1,0 +1,45 @@
+PRINT THE COMPLETE SENSOR HOLDER ON THE IEEE SOVOL SV06
+
+Open SoundScope_SV06_PLA_FULL.3mf in PrusaSlicer as a PROJECT, not geometry only.
+It contains all 12 pieces, their layout, and the printer/filament/print settings.
+No separate fit-check print is required for this job.
+
+This is the stationary tripod carrier for the Gemini 2 and bare reSpeaker.
+It is not an arm/wrist attachment. Assembly is in READ_BEFORE_PRINTING.txt;
+the old makerspace settings and test-first print sequence in that older guide
+do not apply to this SV06 full-print project.
+
+1. Open the 3MF as a project. Confirm printer is the original Sovol SV06,
+   0.4 mm nozzle, and the loaded spool actually says PLA. This is not an SV06
+   Plus/ACE preset. If the spool is PETG, select its proper filament profile
+   and re-slice; do not print PETG with the saved PLA temperatures.
+2. Keep scale at 100% and the supplied flat orientations. No resizing.
+3. Settings already saved: 0.20 mm layers, 0.20 mm first layer, three walls,
+   four top/bottom layers, 15% gyroid infill, no supports, 5 mm outer brim,
+   0.50 mm first-layer line width. Default Generic PLA: 215 C first nozzle
+   layer, 210 C after; 60 C bed. Check the spool's temperature range.
+4. Click Slice now. The checked project estimates 3 h 30 min and 31.40 g on
+   PrusaSlicer 2.9.7. Actual machine time can differ. The earlier 69-minute
+   estimate was for a different, faster printer and is not valid here.
+5. Export ordinary .gcode to the printer's memory card, eject the card, then
+   insert it into the SV06. Do not copy the STL/3MF and expect it to print.
+6. Follow the printer owner's established loading/bed-preparation procedure.
+   Select the exported job using its control knob. Watch the first layer;
+   stop if pieces detach or plastic gathers around the nozzle.
+7. Let the plate cool, remove all 12 pieces, and remove the thin brim borders.
+   Fit the printed screws gently by hand before installing the electronics.
+
+NO GEOMETRY WAS SHRUNK TO FIT THIS PRINTER
+Same twelve parts as the full v2 carrier, translated only.
+Mesh footprint: 205.40 x 204.82 mm. With 5 mm brim approximately
+215.40 x 214.82 mm, within the 220 x 220 mm bed. Project is centered.
+Physical hardware grip, printed-thread fit and actual USB plugs remain untested.
+
+Verification: reloaded the delivered 3MF and sliced it without a separate
+configuration override. Correct SV06, PLA and print settings were retained.
+No support/stability warnings on that final slice. No print has been started.
+
+Tutorial reference: https://www.youtube.com/watch?v=LF6tWhAEzjI
+4:20-6:16 selects Sovol SV06/0.4 nozzle; 17:28-17:55 exports G-code to card.
+The video's supports-everywhere recommendation is for its example phone stand;
+this carrier's supplied orientations were sliced without supports.

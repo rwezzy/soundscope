@@ -1,5 +1,32 @@
 # Validation — 2026-11-04
 
+## Later refinement check
+
+The subsequent refinement suite ran **226 tests: 222 passed, four optional Viam
+tests skipped**. JavaScript syntax and browser interaction checks passed.
+The browser's Inferno selection and 65% opacity were confirmed in server state
+and the rendered synthetic view; no model requests were made.
+
+New tests reproduce two confidence failures: a thin full-height support region
+could previously pass the area threshold, and a 6 kHz pure tone could have a
+strong peak while similarly strong alternatives lay over 50 degrees away.
+Per-axis support extent and whole-hemisphere angular-support checks now mark
+these cases ambiguous. This changes eligibility for a precise target, not the
+underlying peak direction. Calibration and SAM point selection reject unresolved
+directions. No unmeasured direction is shifted toward the centre of the image.
+
+A later real sensor check had healthy capture/HTTP samples and no runtime error,
+but closed early after 27.7 seconds including setup; it did not complete the
+requested 45 seconds. The check harness now distinguishes an early close from a
+completed run. A user-positioned centred-ringtone check also collected numerical
+diagnostics. Vertical scatter and background-surface selection remained; these
+are **not** solved by the new uncertainty labels. No new measured localization
+accuracy claim is made. All refinement checks used zero Meta requests.
+
+Numerical live diagnostics now retain at most 5,000 updates locally, without
+audio, imagery or transcripts. The older results below describe the preceding
+checkpoint and remain useful historical validation.
+
 These checks distinguish software operation from real-world localization accuracy.
 The connected Gemini 2 and reSpeaker XVF3800 were exercised without robot motion
 or audio playback. The original repository was not modified.

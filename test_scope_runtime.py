@@ -60,6 +60,12 @@ class LiveCalibration(unittest.TestCase):
         self.assertFalse(self.controller.active)
         self.assertIn('NEW position', message)
 
+    def test_competing_acoustic_peaks_cannot_calibrate_yaw(self):
+        ev=self.event();ev['fix']['directional_ambiguous']=True
+        self.assertIn('ambiguous',self.click(event=ev))
+        self.assertEqual(len(self.controller.session.samples),0)
+        self.save.assert_not_called()
+
     def test_missing_stale_and_future_audio_are_rejected(self):
         for event in (None, self.event(timestamp=9.0), self.event(timestamp=10.2),
                       {'kind': 'update', 'fix': self.event()['fix'], 'event_id': 9}):

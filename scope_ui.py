@@ -25,6 +25,9 @@ CYAN = (220, 207, 75)
 AMBER = (91, 187, 244)
 GRAY = (143, 137, 126)
 DEFAULT_EXPIRY = 1.2
+HEATMAP_PALETTES = ('amber', 'turbo', 'viridis', 'inferno')
+DEFAULT_HEATMAP_OPACITY = 0.44
+MAX_HEATMAP_OPACITY = 0.85
 
 
 @dataclass(frozen=True)
@@ -206,18 +209,34 @@ def _support(view, shape):
     return strength, support
 
 
-@lru_cache(maxsize=2)
-def _heat_tables(weak):
+def validate_heatmap_style(palette, opacity):
+    """Validate display-only settings; opacity never changes acoustic scores."""
+    if palette not in HEATMAP_PALETTES:
+        raise ValueError(f'heatmap_palette must be one of {HEATMAP_PALETTES}')
+    value = _number(opacity)
+    if value is None or not 0 <= value <= MAX_HEATMAP_OPACITY:
+        raise ValueError(f'heatmap_opacity must be finite and between 0 and {MAX_HEATMAP_OPACITY}')
+    return palette, value
+
+
+@lru_cache(maxsize=64)
+def _heat_tables(weak, palette='amber', opacity=DEFAULT_HEATMAP_OPACITY):
     """Premultiplied BGR heat and camera retention, computed at 256 levels.
 
     OpenCV applies these tiny tables with native byte operations. Computing the
     same color/alpha expressions on full-frame NumPy RGB arrays dominated the
     live loop; byte blending preserves the gradient within rounding precision.
     """
+    palette, opacity = validate_heatmap_style(palette, opacity)
     level = np.linspace(0, 1, 256, dtype=np.float32)
-    alpha = (0.40 if weak else 0.44) * level ** 1.2
-    blend = np.clip((level - 0.25) / 0.75, 0, 1)[:, None]
-    color = np.asarray(CYAN, np.float32) * (1 - blend) + np.asarray(AMBER, np.float32) * blend
+    alpha = opacity * (0.40 / 0.44 if weak else 1.0) * level ** 1.2
+    if palette == 'amber':
+        blend = np.clip((level - 0.25) / 0.75, 0, 1)[:, None]
+        color = np.asarray(CYAN, np.float32) * (1 - blend) + np.asarray(AMBER, np.float32) * blend
+    else:
+        cmap = {'turbo': cv2.COLORMAP_TURBO, 'viridis': cv2.COLORMAP_VIRIDIS,
+                'inferno': cv2.COLORMAP_INFERNO}[palette]
+        color = cv2.applyColorMap(np.arange(256, dtype=np.uint8).reshape(-1, 1), cmap).reshape(256, 3)
     retention = np.rint((1 - alpha) * 255).astype(np.uint8)
     contribution = np.rint(color * alpha[:, None]).astype(np.uint8).reshape(256, 1, 3)
     return retention, contribution
@@ -234,7 +253,8 @@ def _brackets(img, bounds, color, scale):
         cv2.line(img, (cx, cy), (cx, cy + dy * length), color, 2, cv2.LINE_AA)
 
 
-def _camera_overlay(image, view, state, heatmap, diagnostics, scale):
+def _camera_overlay(image, view, state, heatmap, diagnostics, scale,
+                    heatmap_palette='amber', heatmap_opacity=DEFAULT_HEATMAP_OPACITY):
     if state in ('STALE', 'LISTENING'):
         return
     color = CYAN if state == 'CANDIDATE' else AMBER
@@ -242,9 +262,9 @@ def _camera_overlay(image, view, state, heatmap, diagnostics, scale):
     # Display the actual graded score field even if quality gates reject a lock.
     # The support mask controls candidate contours, never visibility of evidence.
     # A zero/flat/invalid field has no heat; nonflat values are relative SRP, not
-    # probability. Strongest heat retains at least 56% of the camera image.
+    # probability. The default strongest heat retains 56% of the camera image.
     if heatmap and strength is not None and cv2.minMaxLoc(strength)[1] > 0:
-        retention_table, heat_table = _heat_tables(state == 'WEAK')
+        retention_table, heat_table = _heat_tables(state == 'WEAK', heatmap_palette, heatmap_opacity)
         level = cv2.convertScaleAbs(strength, alpha=255)
         retention = cv2.cvtColor(cv2.LUT(level, retention_table), cv2.COLOR_GRAY2BGR)
         heat = cv2.applyColorMap(level, heat_table)
@@ -302,7 +322,7 @@ def _sparkline(img, view, rect, color):
 
 def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None,
            heatmap=True, diagnostics=False, paused=False, calibration_active=False,
-           viewport_size=None):
+           viewport_size=None, heatmap_palette='amber', heatmap_opacity=DEFAULT_HEATMAP_OPACITY):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -311,9 +331,13 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     measured fraction in [0, 1]. No fields are interpreted as confidence.
     ``viewport_size=(width, height)`` produces exactly that canvas size and fits
     the camera without stretching. Use this same size for mouse mapping helpers.
+    ``heatmap_palette`` selects amber, turbo, viridis or inferno. ``heatmap_opacity``
+    is the maximum tint alpha (0..0.85); both affect display only. Low score cells
+    stay transparent. Neither option changes localization or evidence thresholds.
     """
     if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8:
         raise ValueError('frame must be a uint8 BGR image with three channels')
+    heatmap_palette, heatmap_opacity = validate_heatmap_style(heatmap_palette, heatmap_opacity)
     view = view or {}
     now = _number(now, time.monotonic())
     state, reason, age, expiry = _state(view, now)
@@ -350,7 +374,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     _text(out, mode, p(24) + layout.main_width - mode_width - p(6), p(114), 0.34 * s,
           AMBER if calibration_active else MUTED)
     camera = frame.copy()
-    _camera_overlay(camera, view, state, heatmap, diagnostics, s)
+    _camera_overlay(camera, view, state, heatmap, diagnostics, s, heatmap_palette, heatmap_opacity)
     if (w, h) != (frame.shape[1], frame.shape[0]):
         interpolation = cv2.INTER_AREA if w < frame.shape[1] else cv2.INTER_LINEAR
         camera = cv2.resize(camera, (w, h), interpolation=interpolation)
@@ -400,7 +424,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
 
     card(434, 126, 'CANDIDATE SURFACE RANGE')
     distance = None
-    if fresh and state in ('CANDIDATE', 'AMBIGUOUS') and view.get('measured') and not view.get('off_screen'):
+    if fresh and state == 'CANDIDATE' and view.get('measured') and not view.get('off_screen'):
         try:
             point = np.asarray(view.get('point'), dtype=float)
             if point.shape == (3,) and np.isfinite(point).all() and point[2] > 0:
@@ -437,7 +461,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     cv2.line(out, (p(24), footer_y), (layout.width - p(24), footer_y), LINE, 1)
     hints = ([('ENTER', 'apply'), ('ESC', 'cancel'), ('C', 'restart'), ('H', 'heatmap'), ('S', 'snapshot'), ('Q', 'quit')]
              if calibration_active else
-             [('C', 'calibrate'), ('H', 'heatmap'), ('D', 'diagnostics'), ('SPACE', 'resume' if paused else 'pause'),
+             [('C', 'calibrate'), ('H', 'heatmap'), ('P', 'palette'), ('D', 'diagnostics'), ('SPACE', 'resume' if paused else 'pause'),
               ('S', 'snapshot'), ('Q', 'quit')])
     cursor = p(24)
     for key, action in hints:

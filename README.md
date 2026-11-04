@@ -34,6 +34,15 @@ Recent hardware and model checks are documented in [VALIDATION.md](VALIDATION.md
 For a two-minute passive sensor/dashboard check with no Meta calls or robot
 connection, close other viewers and run `python live_check.py --seconds 120`.
 
+The browser includes heatmap color and strength controls; **P** also cycles colors
+in the OpenCV window. Ambiguous vertical streaks and competing acoustic peaks
+remain visible as uncertainty, without a precise target. Bounded numerical
+diagnostics are stored locally for troubleshooting; no automatic Meta calls.
+
+The latest stationary [sensor carrier print package](hardware/sensor_carrier_v2/README.md)
+is included, with the SV06 project and assembly diagram. It is a physically
+unverified tripod prototype, not a wrist attachment.
+
 ## Run the viewer
 
 Close other SoundScope instances and Orbbec Viewer first so only one program
