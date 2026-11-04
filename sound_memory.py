@@ -104,6 +104,8 @@ def acoustic_profile(x, fs=FS):
     flatness = float(np.exp(np.log(p).mean()) / p.mean())
     voice_band = float(p[(f >= 300) & (f <= 3400)].sum() / p.sum())
     low_band = float(p[f <= 1000].sum() / p.sum())
+    near = np.abs(f - dominant) <= max(15.0, 0.03 * dominant)
+    tone_share = float(p[near].sum() / p.sum())  # Nov 4, real array: alarms 0.98, voices 0.16-0.27, knocks 0.1
     peak_share = float(p.max() / p.sum())  # one steady tone owns its bin; voices and noise spread out
 
     # Onsets: rises of the 10 ms envelope above half the loudest level (and well above the room),
@@ -141,7 +143,8 @@ def acoustic_profile(x, fs=FS):
     profile = {'duration_s': round(duration, 2), 'rms_dbfs': round(db(rms_loud), 1), 'peak_dbfs': round(db(peak), 1),
                'crest_db': round(db(peak) - db(rms_loud), 1), 'centroid_hz': round(centroid), 'dominant_hz': round(dominant),
                'flatness': round(flatness, 3), 'onsets': int(onsets), 'attack_ms': round(attack_ms),
-               'voice_band': round(voice_band, 2), 'speech_score': round(float(speech), 2)}
+               'voice_band': round(voice_band, 2), 'tone_share': round(tone_share, 3),
+               'speech_score': round(float(speech), 2)}
     profile['contrast_db'] = round(db(loudest) - db(max(quiet, 1e-12)), 1) if 0 < quiet < loudest * 0.3 else None
     profile['character'] = character(profile)
     return profile
@@ -170,7 +173,7 @@ def character(p):
         words.append('short sharp hit')
     elif p['duration_s'] >= 1.0:
         words.append('sustained')
-    if p['flatness'] < 0.12:
+    if p.get('tone_share', 0) >= 0.5 and p['dominant_hz'] >= 200:
         words.append(f"tonal around {_khz(p['dominant_hz'])}")
     elif p['flatness'] > 0.45:
         words.append('noisy, broadband')

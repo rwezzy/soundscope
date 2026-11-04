@@ -284,8 +284,12 @@ class Budget:
                 'calls_today': data['calls'], 'calls_session': dict(self.session_calls)}
 
     def short(self):
-        s = self.summary()
-        return f"Meta ${s['today_usd']:.2f}/{s['daily_limit_usd']:.2f} today"
+        """One-line spend for the screen; re-read at most every 2 s (the viewer asks every frame)."""
+        now = time.monotonic()
+        if not hasattr(self, '_short') or now - self._short[0] > 2.0:
+            s = self.summary()
+            self._short = (now, f"Meta ${s['today_usd']:.2f}/{s['daily_limit_usd']:.2f} today")
+        return self._short[1]
 
 
 def _text_tokens(content):
