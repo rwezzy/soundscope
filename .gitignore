@@ -3,3 +3,4 @@ recordings/
 __pycache__/
 # API keys
 .env
+studio_data/

@@ -245,6 +245,10 @@ class Listener(threading.Thread):
                                  'onset_at': onset_at, 'emitted_at': time.monotonic()}
                         if ended:
                             clip = self._recent(min(out[1]['seconds'] + 0.9, 6.0))  # the sound + its quiet tail
+                            # Measure before wav_bytes peak-normalizes the upload clip.
+                            # This is digital input level, not calibrated sound pressure.
+                            raw = clip[:, self.chans].astype(float)
+                            event['level_dbfs'] = float(20 * np.log10(max(np.sqrt(np.mean(raw * raw)), 1e-12))) if raw.size else None
                             event['wav'] = wav_bytes(clip[:, self.chans].mean(axis=1))
                             event['emitted_at'] = time.monotonic()
                             self.post(event)

@@ -2,6 +2,34 @@
 
 Estimate where a sound is coming from using four microphones and aligned camera depth.
 
+## SoundScope Studio
+
+The integrated workspace adds a browser dashboard, searchable sound history,
+optional Meta analysis, and separate standalone/wrist geometry. Start here:
+
+```powershell
+python studio.py --demo
+```
+
+Open **http://127.0.0.1:8765**. This is an explicitly synthetic UI demonstration;
+it uses no devices, Meta credits, or robot connection. Stop with Ctrl+C before
+starting real sensors:
+
+```powershell
+python studio.py --live
+```
+
+Close other camera/microphone viewers first. The original OpenCV window remains
+available for calibration; the browser adds the timeline and search. Keep both
+sensors stationary and stay quiet for the initial two seconds. Meta is **off by
+default**, even with an API key configured. See [STUDIO_GUIDE.md](STUDIO_GUIDE.md)
+for the bounded three-model workflow, data retention, wrist mode and calibration.
+
+The standalone application does not require the arm or a printed mount. A rigid
+mount is required to preserve the camera/microphone relationship when moving
+them together. Wrist mode currently supplies relative geometry, a motion veto
+and guarded robot-coordinate **previews**, not automatic pickup.
+
 ## Run the viewer
 
 Close other SoundScope instances and Orbbec Viewer first so only one program
@@ -62,9 +90,10 @@ or a robot-to-camera transform. Current `arm_config.toml` still assumes an uprig
 array, USB edge up, with its centre **80 mm below the camera lens**. Verify those
 offsets for the real mount.
 
-The current viewer supports the fixed `camera.mount = "base"` setup only.
-It does not implement wrist-camera pose tracking or autonomous pickup. Existing
-`arm_follow.py` commands are separate from this camera viewer.
+The legacy `python scope.py` entry point supports the fixed
+`camera.mount = "base"` setup. Studio supplies an optional rigid sensor-pair
+transform for wrist-relative viewing. Neither entry point implements autonomous
+pickup. Existing `arm_follow.py` commands remain a separate application.
 
 Validation includes simulated audio, offline regression tests, Windows window
 resizing and calibration-click checks, and live Gemini 2 / reSpeaker input. A
@@ -73,7 +102,8 @@ physical localization accuracy still needs an independent measured benchmark.
 
 - **Where:** a reSpeaker XVF3800 4-mic array. Direction comes from physics (noise-robust SRP-PHAT), not a model.
 - **What (optional):** Muse Spark evaluates a spectrogram image against a named
-  sound via `--target`; this is not a native audio classifier. **Commands:**
+  sound via `--target "ringing" --enable-meta --meta-max-calls 5`; this is an
+  experimental hypothesis, not a validated native audio classifier. **Commands:**
   Muse Voice Transcribe + Muse Spark in the separate arm follower.
 - **Arm:** UFACTORY Lite 6 through Viam. Dry run by default, with slow, limited moves.
 - **Camera view:** visible 3D points are scored against microphone timing evidence.
@@ -84,6 +114,11 @@ physical localization accuracy still needs an independent measured benchmark.
 | File | Purpose |
 |---|---|
 | `scope.py` | Fixed-camera viewer, calibration workflow, recording and evidence snapshots |
+| `studio.py`, `studio_web/` | Integrated local dashboard and explicit Meta actions |
+| `sound_events.py` | Local sound history, phrases and concept/time/direction search |
+| `semantic_meta.py` | Capped Muse Voice, Muse Spark and SAM requests |
+| `rig_geometry.py`, `calibrate_rig.py` | Rigid sensor geometry and offline fixed-camera calibration |
+| `pose_export.py` | Optional read-only Viam tool-pose history for wrist previews |
 | `scope_ui.py` | Dashboard and image-to-canvas coordinate mapping |
 | `calibration.py` | Robust multi-position yaw fitting |
 | `localization_quality.py` | Weak/ambiguous/candidate display heuristics |

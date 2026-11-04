@@ -1,0 +1,2 @@
+# Optional SAM mask decoder, documented by Meta. No model weights or API calls.
+meta-sam-parser==0.1.0

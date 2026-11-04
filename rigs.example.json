@@ -1,0 +1,11 @@
+{
+  "description": "EXAMPLE ONLY. Upright array with cable edge up, nominally 80 mm BELOW the camera. Not the new printed holder; measure and calibrate your actual pair. Camera axes: right/down/forward. All translations in metres.",
+  "units": "m",
+  "mode": "fixed",
+  "T_camera_from_array": [[0, 1, 0, 0], [-1, 0, 0, 0.08], [0, 0, 1, 0], [0, 0, 0, 1]],
+  "T_base_from_camera": null,
+  "T_tool_from_camera": null,
+  "robot_calibrated": false,
+  "calibration_id": null,
+  "wrist_usage": "Set mode to wrist only when BOTH sensors are fixed together. Robot-frame previews also require a measured T_tool_from_camera, robot_calibrated=true, a calibration_id, and a synchronized stationary pose packet. Never substitute an identity transform as a guessed calibration."
+}

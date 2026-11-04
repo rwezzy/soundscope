@@ -12,6 +12,7 @@ candidate, not a confirmed source. A depth contour is available in diagnostics.
 Default mode makes no Meta requests and does not connect to the robot.
 """
 import argparse
+from collections import deque
 import math
 import json
 import os
@@ -39,14 +40,15 @@ MAX_AGE_S = 1.2     # from capture, not from when a queued report reaches the sc
 SNAPSHOTS = Path(__file__).with_name('recordings') / 'snapshots'
 
 
-def score_view(loc, gcc, depth_mm, k, cfg, step=GRID_STEP):
+def score_view(loc, gcc, depth_mm, k, cfg, step=GRID_STEP, rig=None):
     """Heat map over the picture: (scores, pixel u, pixel v, camera points in m, has depth), on a grid."""
     h, w = depth_mm.shape
     v, u = np.mgrid[step // 2:h:step, step // 2:w:step]
     z = depth_mm[v, u] / 1000.0
     has_depth = np.isfinite(z) & (z > 0.1)
     points = backproject(u, v, np.where(has_depth, z, NO_DEPTH_M), k)
-    in_array = aim.base_to_array(aim.camera_to_base(points.reshape(-1, 3) * 1000.0, cfg), cfg)
+    in_array = (rig.camera_points_to_array(points.reshape(-1, 3)) if rig is not None else
+                aim.base_to_array(aim.camera_to_base(points.reshape(-1, 3) * 1000.0, cfg), cfg))
     return loc.srp_points(gcc, in_array).reshape(z.shape), u, v, points, has_depth
 
 
@@ -60,16 +62,30 @@ def best_spot(scores, has_depth, points):
     return np.unravel_index(int(np.argmax(pick)), scores.shape)
 
 
-def camera_direction(direction, cfg):
+def camera_direction(direction, cfg, rig=None):
     """An array-frame direction in camera coordinates (x right, y down, z out of the lens)."""
+    if rig is not None:
+        return rig.array_direction_to_camera(direction)
     d = aim.array_axes(cfg) @ np.asarray(direction, float)
     c = cfg['camera']['base']
     return np.array([d @ axis for axis in aim.camera_axes(c['yaw_deg'], c['pitch_deg'])])
 
 
-def off_screen(direction, cfg, k, shape):
+def off_screen(direction, cfg, k, shape, rig=None):
     """None if the sound's line (from the board's real position) crosses the picture, else
     (which edge: 'left' | 'right' | 'above' | 'below', degrees off the camera's center)."""
+    if rig is not None:
+        d = rig.array_direction_to_camera(direction)
+        start = rig.array_origin_camera_m
+        h, w = shape
+        for r in (.3, .5, .8, 1.2, 2., 3.5):
+            pixel = project(start + r * d, k)
+            if pixel is not None and 0 <= pixel[0] < w and 0 <= pixel[1] < h:
+                return None
+        x, y, z = d
+        if abs(x) >= abs(y):
+            return ('right' if x > 0 else 'left'), abs(math.degrees(math.atan2(x, z)))
+        return ('below' if y > 0 else 'above'), abs(math.degrees(math.atan2(y, z)))
     c = cfg['camera']['base']
     axes = aim.camera_axes(c['yaw_deg'], c['pitch_deg'])
     d = aim.array_axes(cfg) @ np.asarray(direction, float)
@@ -145,12 +161,12 @@ def outline(depth_mm, k, u, v, radius_m=0.12, rng=None):
     return max(contours, key=cv2.contourArea) + np.array([x0, y0]) if contours else None
 
 
-def make_view(ev, final, loc, depth_mm, k, cfg):
+def make_view(ev, final, loc, depth_mm, k, cfg, rig=None):
     """Everything to draw for one sound estimate."""
     fix = ev['fix']
     view = {'time': ev.get('observed_at', time.monotonic()), 'final': final, 'fix': fix,
             'event_id': ev.get('event_id'), 'expires_after': MAX_AGE_S}
-    away = off_screen(fix['direction'], cfg, k, depth_mm.shape)
+    away = off_screen(fix['direction'], cfg, k, depth_mm.shape, rig=rig)
     if away:
         view['off_screen'] = away
         strong = fix.get('z', 0) >= 12 and fix.get('coherence', 0) >= 0.10
@@ -158,14 +174,15 @@ def make_view(ev, final, loc, depth_mm, k, cfg):
                            'reason': 'Direction outside the camera view; object unverified.',
                            'peak_score': fix.get('coherence', 0), 'support_fraction': 0.0}
         return view
-    scores, us, vs, points, has_depth = score_view(loc, loc.gcc(*fix['evidence'][:2]), depth_mm, k, cfg)
+    scores, us, vs, points, has_depth = score_view(loc, loc.gcc(*fix['evidence'][:2]), depth_mm, k, cfg, rig=rig)
     i, j = best_spot(scores, has_depth, points)
     view.update(scores=scores, spot=(int(us[i, j]), int(vs[i, j])), point=points[i, j],
                 measured=bool(has_depth[i, j]))
     view['quality'], view['support_mask'] = assess(scores, fix)
     if final:
         view['contour'] = outline(depth_mm, k, *view['spot'])
-        view['reach'] = aim.reach_check(aim.camera_to_base(points[i, j] * 1000.0, cfg), cfg)
+        if rig is None:
+            view['reach'] = aim.reach_check(aim.camera_to_base(points[i, j] * 1000.0, cfg), cfg)
     return view
 
 
@@ -435,17 +452,22 @@ def save_snapshot(out, frame, depth, k, cfg, ev, loc, *, frame_at=None):
     return png
 
 
-def run(args, cfg):
+def run(args, cfg, bridge=None, rig=None):
     import multiprocessing
     from camera import Gemini
 
-    if cfg['camera']['mount'] != 'base':
+    if cfg['camera']['mount'] != 'base' and rig is None:
         raise SystemExit('This viewer needs a fixed camera/array. Moving-camera transforms are not implemented here.')
-    meta = Meta() if args.target else None
+    if args.target and not getattr(args,'enable_meta',False):
+        raise SystemExit('Target model checks need --enable-meta; use --meta-max-calls to cap requests.')
+    from bounded_target import BoundedTarget
+    meta = BoundedTarget(getattr(args,'meta_max_calls',5)) if args.target else None
     events, stop = multiprocessing.Queue(maxsize=32), multiprocessing.Event()
     process = multiprocessing.Process(target=listen, args=(events, stop), daemon=True)
     cam, recorder = None, None
-    ui = {'note': 'Listening. Fixed camera + microphone. Robot control is off.', 'last': None}
+    rig_note = ('Rigid wrist sensor pair; listen while stationary.'
+                if rig is not None and rig.mode == 'wrist' else 'Fixed camera + microphone.')
+    ui = {'note': f'Listening. {rig_note} Robot control is off.', 'last': None}
     cal = CalibrationController()
     shape, click = None, None
     view, latest, meta_worker, evidence_frame = None, None, None, None
@@ -454,6 +476,7 @@ def run(args, cfg):
     viewport = initial_viewport()
     displayed_viewport = None
     displayed = None
+    frame_history = deque(maxlen=18)  # ~1.4 s at 12 Hz; bounded RGB-D memory.
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click
@@ -511,14 +534,19 @@ def run(args, cfg):
             last_frame_at = now
             if not paused:
                 frame, depth, k = got
+                if bridge is not None and (not frame_history or now-frame_history[-1][0] >= .08):
+                    frame_history.append((now,frame.copy(),depth.copy(),dict(k)))
                 held = got
                 shape = frame.shape
+                stable = bridge.check_frame(frame, now) if bridge is not None else True
                 ev = newest_sound(reports, now)
-                if ev is not None and ev['observed_at'] >= last_timestamp:
+                if not stable:
+                    view, latest, evidence_frame = None, None, None
+                if ev is not None and stable and (bridge is None or bridge.accept_event(ev)) and ev['observed_at'] >= last_timestamp:
                     latest = ev
                     last_timestamp = ev['observed_at']
                     final = ev['kind'] == 'sound'
-                    view = make_view(ev, final, loc, depth, k, cfg)
+                    view = make_view(ev, final, loc, depth, k, cfg, rig=rig)
                     evidence_frame = (frame.copy(), depth.copy(), dict(k), now)
                     view['show_reach'] = args.reach
                     if final or now - ui.get('printed', 0) > 1:
@@ -530,6 +558,15 @@ def run(args, cfg):
                         meta_worker = threading.Thread(target=check_sound,
                                                        args=(meta, ev['wav'], args.target, view), daemon=True)
                         meta_worker.start()
+                if bridge is not None and stable:
+                    # Preserve completed events even when a newer running estimate
+                    # wins the viewer queue. Do not reuse its acoustic coordinates.
+                    for report in reports:
+                        if report.get('kind') == 'sound' and bridge.accept_event(report) and 0 <= now-report.get('observed_at', -1e9) <= MAX_AGE_S:
+                            source_at,source_frame,source_depth,source_k = min(frame_history,key=lambda entry:abs(entry[0]-report['observed_at']))
+                            if abs(source_at-report['observed_at']) <= .15:
+                                event_view = make_view(report, True, loc, source_depth, source_k, cfg, rig=rig)
+                                bridge.observe(report, event_view, source_frame, now, cfg, rig, frame_at=source_at)
             else:
                 frame, depth, k = held
             now = time.monotonic()  # include scoring work in freshness checks
@@ -544,6 +581,8 @@ def run(args, cfg):
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
                        viewport_size=viewport)
             cv2.imshow(WINDOW, out)
+            if bridge is not None:
+                bridge.publish_frame(out, paused=paused)
             displayed_viewport = viewport
             displayed = (latest, depth, dict(k))
             if recorder:
@@ -554,13 +593,19 @@ def run(args, cfg):
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
             if key == ord('c') and not paused:
-                say(ui, cal.start(cfg))
+                if bridge is not None and bridge.explicit_rig:
+                    say(ui, 'Explicit rig loaded: use its measured calibration; legacy C calibration is disabled.')
+                else:
+                    say(ui, cal.start(cfg))
             elif key == 27:
                 cal.active, click = False, None
                 say(ui, 'Calibration cancelled. Existing settings kept.')
             elif key in (10, 13) and cal.active and not paused:
                 try:
                     say(ui, cal.apply(cfg))
+                    if bridge is not None:
+                        rig = bridge.refresh_legacy_rig(cfg)
+                    frame_history.clear()
                     view, latest, evidence_frame = None, None, None
                 except (OSError, ValueError) as exc:
                     say(ui, f'Could not save calibration: {exc}')
@@ -591,11 +636,17 @@ def run(args, cfg):
                     cleanup()
                 except Exception as exc:
                     print(f'Cleanup warning: {exc}', flush=True)
+        if meta_worker is not None:
+            meta_worker.join(timeout=1)
+        if meta is not None and (meta_worker is None or not meta_worker.is_alive()):
+            meta.close()
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--target', help='also ask Muse Spark whether the sound is this')
+    p.add_argument('--enable-meta', action='store_true', help='explicitly enable bounded target-model requests')
+    p.add_argument('--meta-max-calls', type=int, choices=range(0,21), default=5, help='maximum attempted Meta calls this run, default 5')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
     p.add_argument('--seconds', type=float, help='stop after this long')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
