@@ -1,0 +1,32 @@
+# Wrist mount v4 (cad/v4/PRINT_wrist_v4.stl + the v3 board frame, clips and pins): a one-piece saddle that
+# hugs the Lite 6 vacuum gripper's oval body (UFACTORY's own model), held by one M6 set screw. Camera on one
+# narrow side of the gripper, mic board on the other; the cable-port end and the arm's metal ring stay free.
+# Camera and mics move together, so the viewer works in the camera's own frame (no calibration needed):
+#   python scope.py --mount wrist_v4
+#   python arm_follow.py --mount wrist_v4 listen      (dry run unless --live)
+# Numbers from cad/mount_v4_wrist.py.
+
+[camera]
+mount = "arm"
+
+[camera.base]                  # camera-relative frame for the viewer (the camera is the origin)
+position_mm = [0, 0, 0]
+yaw_deg = 0
+pitch_deg = 0
+
+[camera.arm]                   # color lens in the flange (link_eef) frame, mm, saddle's open side toward the
+offset_mm = [42.4, -17.0, 50.0]  # cable port: across the narrow side, along the wide ends, along the axis
+lens_direction = [0, 0, 1]     # (11 mm behind the suction cup tip)
+roll_deg = 0
+
+[array]
+mount = "facing"
+on_arm = true
+cable_edge = "down"            # board USB edge points away from the gripper = "down" in the picture
+position_mm = [-0.6, -17.0, -138.3]   # [forward, left, up] from the color lens: the board sits on the far
+                                      # side of the gripper, 138 mm "below" the lens in the camera's picture
+front_yaw_deg = 0              # press C in scope.py --mount wrist_v4 to fine-tune; it is saved here
+
+[aim]
+wrist_yaw_sign = -1            # flip to 1 if a dry run turns away from the sound
+wrist_pitch_sign = 1

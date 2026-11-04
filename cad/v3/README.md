@@ -5,6 +5,8 @@ grippers); caliper readings only where nothing official exists (gripper body 77.
 Source: `cad/mount_v3.py`. Fit checks: camera at max tolerance, board with its edge parts, USB plug,
 jack and mics, tripod head and gripper - all clear except the intended crush ribs.
 
+> **Wrist: use v4 instead** (`cad/v4/`). The v3 wrist ring assumed a round 77.5 mm gripper body; UFACTORY's model shows it is an oval (52 x 75 mm), so that ring can't clamp. The standing mount below is unchanged.
+
 ## What to print
 
 | File | What | 0.28mm DRAFT, PLA (sliced) |
