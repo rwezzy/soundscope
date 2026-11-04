@@ -1,37 +1,41 @@
 # Demo video: 2-3 minutes
 
-One idea per shot. Screen-record the viewer (it has no audio track) and film the room with a phone
-at the same time, so claps and voices are heard.
+The story: **sounds you can't hear, made visible.** One idea per shot. Screen-record the viewer
+(it records no audio) and film the room with a phone at the same time, so the sounds are heard.
 
 ## Before recording (10 min)
 
-- **Lights on.** The color camera needs light; in the dark SoundScope switches to depth shapes
-  ("night mode"), which works but looks less impressive.
-- Tripod mount on the table, camera facing the area you will act in. Calibrate once:
-  `python scope.py --mount tripod`, press **C**, play a sound left / center / right and click it,
-  **Enter**.
-- Record 2-3 examples of a sound you will use, so it gets a free, instant label:
-  `python soundscope.py enroll "phone ringing"` (play the ring after each Enter).
-- Start fresh: move or rename today's file in `recordings/memory/` if it has test sounds in it.
-- Check the budget: `python soundscope.py budget` (a full demo uses well under $0.50).
+- **Lights on**, camera and mic board on a stand (the compact stand: `--mount tripod`; the new
+  size-tolerant v5 stand: `--mount stand_v5`), on a desk or the floor, facing the room. The commands
+  below use `--mount tripod`; swap in your stand's name.
+  Plug both into the laptop (the camera into a USB 3 port). If SoundScope says "No Orbbec camera
+  is plugged in", replug it.
+- Calibrate once: `python scope.py --mount tripod`, press **C**, clap left / center / right and click
+  each spot while it sounds, **Enter**. Quit with **Q**.
+- Optional, makes alerts instant and free: `python soundscope.py enroll "doorbell"` (play your doorbell
+  or a doorbell sound after each Enter). Same for "smoke alarm".
+- Start fresh: rename today's file in `recordings/memory/` if it has test sounds in it.
+- `python soundscope.py budget`: a full demo uses well under $0.50 of the $1 daily cap.
 
 ## Shots
 
-| # | Time | Do | Say (or caption) | Shows |
+| # | Time | Do | Say (or caption) | Screen shows |
 |---|---|---|---|---|
-| 1 | 0:00-0:15 | Wide shot of the rig, then the viewer | "SoundScope finds where a sound came from, shows the object, and remembers it." | The rig, the dashboard |
-| 2 | 0:15-0:40 | `python scope.py --mount tripod --meta --watch "phone ringing"`. Clap on the left, then the right. | "Four microphones find the direction with physics, not a model. The depth camera shows the spot." | Heat map jumps to each clap, distance in meters |
-| 3 | 0:40-1:05 | Ring a phone lying on the table. | "Muse Spark looks at the sound's spectrogram AND at the spot the mics picked, before and after. It names the object and checks that sound and sight agree." | Caption "phone ringing: a phone (sound + sight agree)", SAM 3.1 outline around the phone, **ALERT: phone ringing** |
-| 4 | 1:05-1:30 | Two people talk from different sides (or one person moves). | "Muse Voice Transcribe writes down who said what; the mics name each talker by where they stand." | Captions "Speaker 1 (to the left): ...", "Speaker 2 (to the right): ..." |
-| 5 | 1:30-1:55 | Press **V**: "When did the phone ring?" | "The memory answers from what was measured: when, where, how loud, what was near." | The answer appears in Field Notes, with a marker on the picture where it rang |
-| 6 | 1:55-2:15 | Terminal: `python soundscope.py digest --minutes 5` and `python soundscope.py map` | "A summary of everything heard, and a map of where it came from." | Digest text, sound map picture |
-| 7 | 2:15-2:40 | (Arm, if printed) `python arm_follow.py --mount wrist listen` (dry run, or `--live` with E-stop in hand). Clap to one side. | "On the robot, the camera and mics ride on the gripper. It turns toward the sound with no camera calibration." | Arm turning, or the printed J1 plan |
-| 8 | 2:40-2:55 | Back to the viewer | "No image detection decides where a sound came from. Physics picks the spot; Meta models describe it." | Closing frame |
+| 1 | 0:00-0:15 | The rig, then the viewer | "If you can't hear a sound, you also can't tell where it came from. SoundScope shows you." | The stand, the dashboard |
+| 2 | 0:15-0:35 | `python scope.py --mount tripod --assist --name Keith`. Clap on the left, then the right. | "Four microphones find the direction with physics, not a model; the depth camera shows the spot." | Heat map jumps to each clap, distance in meters |
+| 3 | 0:35-0:55 | Play a smoke alarm sound from a phone on one side of the room. | "Muse Spark recognizes it from its spectrogram and SoundScope says where it is." | Red banner **ALERT: smoke alarm (to the left)**, beep |
+| 4 | 0:55-1:20 | Someone says "Keith, dinner's ready" from the other side. | "Muse Voice Transcribe writes it down; the mics say who and where. Your name raises an alert." | Caption at the talker, **ALERT: Speaker 1 said "Keith" (to the right)** |
+| 5 | 1:20-1:40 | A phone rings on the table. | "Muse Spark looks at the sound and at the spot the mics picked, before and after; SAM 3.1 outlines the object." | "phone ringing: a phone (sound + sight agree)", outline around the phone |
+| 6 | 1:40-2:00 | Press **V**: "Did anyone knock while I was away?" | "Every sound is remembered: when, where, how loud. Ask in plain words." | Answer in Field Notes, marker where it happened |
+| 7 | 2:00-2:15 | Terminal: `python soundscope.py digest --minutes 10`, then `python soundscope.py map` | "A summary of what happened, and a map of where." | Digest text, sound map |
+| 8 | 2:15-2:35 | (Optional) Arm with the wrist mount: `python arm_follow.py --mount wrist_v4 listen` (dry run, or `--live` with the E-stop in hand). Clap to one side. | "The same directions can turn a robot toward a sound." | Arm turning, or the printed turn plan |
+| 9 | 2:35-2:50 | Back to the viewer | "No image detection decides where a sound came from. Physics picks the spot; Meta models explain it." | Closing frame |
 
 ## If something goes wrong
 
-- Nothing on screen when you clap: clap louder or closer; a fan or heater right after start-up is
-  absorbed within ~3 s.
-- Labels late: Muse Spark takes 3-8 s per sound; do one sound at a time with a pause.
+- Nothing appears when you clap: clap louder or closer. A fan or heater switching on is absorbed as
+  background within ~3 s.
+- Labels arrive a few seconds late: Muse Spark takes 3-8 s per sound. Pause between sounds.
 - "Meta features paused": the daily budget is used up; raise `META_DAILY_LIMIT_USD` in `.env`.
-- Voice not understood: speak toward the board, short commands ("find my keys").
+- No camera at hand: `python soundscope.py listen --assist --name Keith` does alerts and captions
+  with the mics alone (terminal output, no picture).

@@ -79,17 +79,16 @@ Base frame: origin = base center at table level; **+X = where the arm reaches at
 If the first live turn stops with "J1 swung the arm the opposite way": make sure the arm's Viam frame has no rotation and the 3D scene shows the arm reaching along +X at J1 = 0.
 
 ## Wrist mount (camera + mics on the gripper)
-Print `cad/wrist_mount.stl` (one part, no supports, about 1 h). It clamps around the 77.5 mm
-gripper body with one spare M6x10 screw; camera and board both look where the suction cup looks.
-1. Slide the ring onto the gripper, tighten the screw until snug (it cuts its own thread in PLA).
-2. Camera in the sleeve, lenses toward the cup, **tripod-thread side facing away from the gripper**.
-3. Board edge-first into the C-groove, LED face toward the cup, USB edge outward.
-4. Dry run, arm off: `python arm_follow.py --mount wrist simulate 25 -40` should print J1 going
+Print `cad/v4/PRINT_wrist_v4_full_set.stl` (one plate; or `PRINT_wrist_v4.stl` plus the v3 stand's
+board frame, clips and pins). It is a one-piece saddle shaped to the vacuum gripper's real oval body
+(UFACTORY's own model), held by one spare M6 set screw; the arm's cable port and manual-mode button stay
+free. Fit steps: `cad/v4/README.md`.
+1. Dry run, arm off: `python arm_follow.py --mount wrist_v4 simulate 25 -40` should print J1 going
    **down** for a sound on the right (`25`) and **up** for one on the left (`-40`).
-5. Real mics, still a dry run: `python arm_follow.py --mount wrist listen`. Clap to one side; the
+2. Real mics, still a dry run: `python arm_follow.py --mount wrist_v4 listen`. Clap to one side; the
    printed J1 change should turn the camera toward the clap. If it turns away, set
-   `wrist_yaw_sign = 1` in `profiles/wrist.toml`.
-6. Only then, with the E-stop in hand: `live = true` in `arm_config.toml` and `--live` (type MOVE).
+   `wrist_yaw_sign = 1` in `profiles/wrist_v4.toml`.
+3. Only then, with the E-stop in hand: `live = true` in `arm_config.toml` and `--live` (type MOVE).
 
 How it aims: the mics ride with the camera, so each sound's angle off the camera's center is all it
 needs (J1 += sign x angle, J5 too with `use_pitch`). No camera-to-arm calibration, no assumed
