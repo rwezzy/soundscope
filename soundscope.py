@@ -152,8 +152,9 @@ def cmd_listen(args):
     cfg = aim.load_config(profile=args.mount)
     memory = sound_memory.Memory()
     meta = get_meta(args) if args.meta else None
+    references = sound_memory.ReferenceBank()
     enricher = None
-    if meta is not None:
+    if meta is not None or references.items:
         def show(rid, kind, payload):
             rec = memory.get(rid)
             if kind == 'notice':
@@ -161,10 +162,13 @@ def cmd_listen(args):
             elif kind == 'captions':
                 for turn in payload:
                     print(f"  {turn['name']} ({turn['where']}): {turn['text']}")
+            elif kind == 'alert':
+                print(f"  ALERT: {payload['watch']} ({payload['how']})")
             elif rec is not None and kind in ('identify', 'label'):
                 print('  -> ' + sound_memory.phrase(rec))
-        enricher = Enricher(memory, meta, set(FEATURES) - {'context', 'outline'}, on_result=show,
-                            references=sound_memory.ReferenceBank())
+        features = set(FEATURES) - {'context', 'outline'} if meta is not None else set()
+        enricher = Enricher(memory, meta, features, on_result=show, references=references)
+        enricher.watch = list(args.watch or [])
         enricher.start()
     inbox = queue.Queue()
     listener = Listener(inbox.put, updates=True, threshold_db=cfg.get('listen', {}).get('threshold_db', 0.5))
@@ -236,6 +240,7 @@ def main():
     s = sub.add_parser('listen', help='mics only: log every sound to memory')
     s.add_argument('--mount', choices=sorted(aim.profiles()))
     s.add_argument('--meta', action='store_true', help='label sounds and caption speech with Meta models')
+    s.add_argument('--watch', action='append', help='alert when this sound happens (repeatable)')
     s.add_argument('--seconds', type=float)
     args = p.parse_args()
     load_env(ENV_FILE)

@@ -354,7 +354,7 @@ def _sparkline(img, view, rect, color):
 
 def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None,
            heatmap=True, diagnostics=False, paused=False, calibration_active=False,
-           viewport_size=None, status=None, captions=()):
+           viewport_size=None, status=None, captions=(), outlines=()):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -407,6 +407,8 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     _camera_overlay(camera, view, state, heatmap, diagnostics, s)
     if state not in ('STALE', 'LISTENING'):
         _sam_outline(camera, view, s)
+    if outlines:  # SAM outlines of sound sources, kept a few seconds after their sound
+        _sam_outline(camera, {'sam_outline': outlines}, s)
     _captions(camera, captions, frame.shape[1] / 1280.0 * 1.4)
     if (w, h) != (frame.shape[1], frame.shape[0]):
         interpolation = cv2.INTER_AREA if w < frame.shape[1] else cv2.INTER_LINEAR

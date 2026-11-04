@@ -134,7 +134,9 @@ def acoustic_profile(x, fs=FS):
               + 0.3 * np.clip(mod / 0.4, 0, 1) * np.clip(wobble / 0.5, 0, 1)
               + 0.2 * np.clip((pitch - 0.3) / 0.5, 0, 1) * np.clip(low_band / 0.3, 0, 1)
               + 0.2 * np.clip(low_band / 0.35, 0, 1))
-    speech *= float(flatness < 0.45) * float(duration >= 0.35) * float(peak_share < 0.25)
+    # Speech always carries energy below 1 kHz (measured Nov 4: 50-89% for real voices through the
+    # array, 0-1% for a 2.9 kHz alarm that otherwise looked syllable-like).
+    speech *= float(flatness < 0.45) * float(duration >= 0.35) * float(peak_share < 0.25) * float(low_band >= 0.2)
 
     profile = {'duration_s': round(duration, 2), 'rms_dbfs': round(db(rms_loud), 1), 'peak_dbfs': round(db(peak), 1),
                'crest_db': round(db(peak) - db(rms_loud), 1), 'centroid_hz': round(centroid), 'dominant_hz': round(dominant),

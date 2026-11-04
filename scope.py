@@ -625,6 +625,7 @@ class Session:
         self.results = collections.deque()  # (record id, kind, payload) from the worker thread
         self.captions = []                  # {'text', 'pixel', 'until', 'kind'}
         self.outline = None                 # (record id, polygons, until)
+        self.outlines = []                  # (polygons, until): SAM outlines drawn on their own
         self.tracks = {}                    # event id -> [(capture time, azimuth, elevation)]
         self.event_records = {}             # event id -> record id
         self.frames = collections.deque(maxlen=24)  # (time, small frame, scale): ~5 s for "before" crops
@@ -633,10 +634,14 @@ class Session:
         self.meta, self.enricher = None, None
         if self.features:
             self.meta = Meta()
+        if self.features or (self.references is not None and self.references.items):
+            # Your recorded examples label sounds (and match watches) for free, with or without Meta.
             self.enricher = Enricher(self.memory, self.meta, self.features,
                                      on_result=lambda *r: self.results.append(r),
                                      references=self.references, speakers=self.speakers)
             self.enricher.start()
+        for sound in getattr(args, 'watch', None) or []:
+            self.add_watch(sound)
 
     @property
     def active(self):
@@ -729,9 +734,12 @@ class Session:
                         before, scale = self.frame_before(report.get('onset_at', report.get('observed_at', 0.0)) - 0.25)
                         if before is not None:  # same spot, just before the sound began: what changed there?
                             task['crop_before'] = crop_jpeg(before, (pixel[0] * scale, pixel[1] * scale))
-                if outline and pixel is not None and frame is not None:
+                if pixel is not None and frame is not None and 'outline' in self.features and \
+                        (outline or ('context' in self.features and 'crop_kind' not in task)):
+                    # The whole picture rides along so SAM can outline the object when sound and sight
+                    # agree (or right away for a found target). Not in night mode: nothing to outline.
                     jpeg, size, small_pixel, scale = frame_jpeg(frame, pixel)
-                    task.update(outline=True, frame_jpeg=jpeg, frame_size=size, pixel=small_pixel, scale=scale)
+                    task.update(outline=outline, frame_jpeg=jpeg, frame_size=size, pixel=small_pixel, scale=scale)
                 self.enricher.submit(task)
             return rec
         except Exception as exc:
@@ -759,16 +767,18 @@ class Session:
             rid, kind, payload = self.results.popleft()
             rec = self.memory.get(rid) if self.memory is not None else None
             pixel = (rec or {}).get('where', {}).get('pixel')
+            age = time.time() - rec['epoch'] if rec is not None else 0.0
+            if age > (25.0 if kind == 'captions' else 15.0) and kind not in ('notice', 'alert'):
+                pixel = 'late'  # still saved and printed, but no longer drawn on the live picture
             if kind == 'notice':
                 notes.append(str(payload))
             elif kind == 'captions':
                 for turn in payload:
                     text = f"{turn['name']} ({turn['where']}): {turn['text']}"
-                    self.captions.append({'text': text, 'pixel': pixel, 'until': now + CAPTION_S, 'kind': 'speech'})
+                    self.show(text, pixel, now + CAPTION_S, 'speech')
                     print('  ' + text, flush=True)
             elif kind in ('identify', 'label') and rec is not None:
-                self.captions.append({'text': sound_memory.what_it_was(rec), 'pixel': pixel,
-                                      'until': now + 4.0, 'kind': 'label'})
+                self.show(sound_memory.what_it_was(rec), pixel, now + 4.0, 'label')
                 print('  ' + sound_memory.phrase(rec), flush=True)
             elif kind == 'context' and rec is not None:
                 print(f"  near the spot: {rec['near']['text']}", flush=True)
@@ -776,13 +786,14 @@ class Session:
                 src = rec.get('source') or {}
                 mark = {'yes': 'sound + sight agree', 'no': 'sound + sight disagree', 'unsure': 'unconfirmed'}
                 text = f"{sound_memory.what_it_was(rec)}: {src.get('object', '?')} ({mark.get(src.get('consistent'), '?')})"
-                self.captions.append({'text': text, 'pixel': pixel, 'until': now + 6.0, 'kind': 'label'})
+                self.show(text, pixel, now + 6.0, 'label')
                 print('  ' + sound_memory.phrase(rec), flush=True)
             elif kind == 'alert':
                 where = (rec or {}).get('where', {}).get('words', '')
                 text = f"ALERT: {payload['watch']}" + (f' ({where})' if where else '')
                 self.alert = (text, now + 8.0)
-                self.captions.append({'text': text, 'pixel': pixel, 'until': now + 8.0, 'kind': 'alert'})
+                self.captions.append({'text': text, 'pixel': pixel if pixel != 'late' else None,
+                                      'until': now + 8.0, 'kind': 'alert'})
                 if self.memory is not None and rec is not None:
                     self.memory.update(rid, {'alerts': sorted(set((rec.get('alerts') or []) + [payload['watch']]))})
                 notes.append(f"{text}, matched by {payload['how']}")
@@ -791,13 +802,21 @@ class Session:
                 scale = payload.get('scale') or 1.0
                 polygons = [(np.asarray(poly, float) / scale).astype(np.int32) for poly in payload['polygons']]
                 self.outline = (rid, polygons, now + 8.0)
+                if pixel != 'late' and self.mode == 'tripod':  # a still camera: the outline stays valid
+                    self.outlines = (self.outlines + [(polygons, now + 8.0)])[-3:]
                 print(f'  SAM 3.1 outlined the object at the spot ({len(polygons)} part(s))', flush=True)
         self.captions = [c for c in self.captions if c['until'] > now][-5:]
+        self.outlines = [o for o in self.outlines if o[1] > now]
         if self.alert and self.alert[1] <= now:
             self.alert = None
         if self.outline and self.outline[2] <= now:
             self.outline = None
         return notes
+
+    def show(self, text, pixel, until, kind):
+        """A caption at the sound's pixel, unless the result came in too late to be useful on screen."""
+        if pixel != 'late':
+            self.captions.append({'text': text, 'pixel': pixel, 'until': until, 'kind': kind})
 
     def ask(self, cmd, text):
         """Answer a spoken question about past sounds (search / who / describe), or set a watch."""
@@ -1022,7 +1041,8 @@ def run(args, cfg):
                        now=pause_time if paused else now,
                        fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
-                       viewport_size=viewport, captions=session.captions)
+                       viewport_size=viewport, captions=session.captions,
+                       outlines=[poly for polys, _ in session.outlines for poly in polys])
             cv2.imshow(WINDOW, out)
             displayed_viewport = viewport
             displayed = (latest, depth, dict(k))
@@ -1099,6 +1119,7 @@ def main():
                           ('context', 'Muse Spark names what is near the spot the sound picked'),
                           ('outline', 'SAM 3.1 outlines a found target at the spot the sound picked')):
         p.add_argument('--' + feature, action='store_true', help=text)
+    p.add_argument('--watch', action='append', help='alert when this sound happens, e.g. --watch "phone ringing"')
     p.add_argument('--no-memory', dest='memory', action='store_false', help='do not save heard sounds')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
     p.add_argument('--seconds', type=float, help='stop after this long')

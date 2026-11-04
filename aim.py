@@ -77,10 +77,15 @@ def warnings(cfg):
     """Setup problems worth printing before anything runs."""
     out = []
     gap = fingertip_clearance(cfg)
+    on_arm = cfg['array'].get('on_arm')
     if cfg['camera']['mount'] == 'arm' and gap < cfg['camera']['min_depth_mm']:
-        out.append(f'the fingertips are only {gap:.0f} mm in front of the arm-mounted lens, but depth starts '
-                   f'at {cfg["camera"]["min_depth_mm"]} mm. Move the camera back on its mount.')
-    if math.hypot(*cfg['array']['position_mm'][:2]) < 120:
+        if on_arm:  # the wrist mount looks past the suction cup: fine for finding sounds, not for grasping
+            out.append(f'objects at the gripper tip ({gap:.0f} mm from the lens) are closer than the camera\'s '
+                       f'{cfg["camera"]["min_depth_mm"]} mm depth range; depth works for things farther away.')
+        else:
+            out.append(f'the fingertips are only {gap:.0f} mm in front of the arm-mounted lens, but depth starts '
+                       f'at {cfg["camera"]["min_depth_mm"]} mm. Move the camera back on its mount.')
+    if not on_arm and math.hypot(*cfg['array']['position_mm'][:2]) < 120:
         out.append('the mic array is within 12 cm of the arm base; the arm may block or bump it.')
     return out
 

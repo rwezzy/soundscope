@@ -72,6 +72,30 @@ class Profiles(unittest.TestCase):
         self.assertIn('character', sm.acoustic_profile(np.zeros(10)))
 
 
+class RealArrayRecordings(unittest.TestCase):
+    """Clips captured by the real XVF3800 on Nov 4 (laptop text-to-speech and test tones, ~1.7 m)."""
+
+    def clip(self, name):
+        return sm.wav_samples((Path(__file__).with_name('test_data') / name).read_bytes())
+
+    def test_speech_alarm_and_knock(self):
+        speech = sm.acoustic_profile(self.clip('array_tts_find_my_keys.wav'))
+        alarm = sm.acoustic_profile(self.clip('array_alarm_2900hz.wav'))   # once looked "speech-like"
+        knock = sm.acoustic_profile(self.clip('array_knock.wav'))
+        self.assertEqual(speech['character'], 'speech-like')
+        self.assertLess(alarm['speech_score'], sm.SPEECH_SCORE)
+        self.assertIn('tonal around 2.9 kHz', alarm['character'])
+        self.assertIn('3 quick bursts', knock['character'])
+
+    def test_examples_tell_them_apart(self):
+        bank = sm.ReferenceBank(tempfile.mkdtemp())
+        folder = Path(__file__).with_name('test_data')
+        bank.add('smoke alarm', (folder / 'array_alarm_2900hz.wav').read_bytes())
+        bank.add('knock', (folder / 'array_knock.wav').read_bytes())
+        self.assertEqual(bank.nearest(self.clip('array_knock.wav'))[0], 'knock')
+        self.assertEqual(bank.nearest(self.clip('array_alarm_2900hz.wav'))[0], 'smoke alarm')
+
+
 class Records(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

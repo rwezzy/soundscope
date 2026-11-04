@@ -154,6 +154,19 @@ class Worker(unittest.TestCase):
         text = sm.phrase(rec)
         self.assertIn('at the spot: a black phone (screen lit up), sound and sight agree', text)
 
+    def test_agreeing_source_gets_outlined_and_old_sounds_cost_nothing(self):
+        e = self.enricher()
+        e.process(self.task(clicks(), crop_jpeg=b'after', frame_jpeg=b'frame', frame_size=(640, 400),
+                            pixel=(100, 80), scale=0.5))
+        self.meta.segment_at.assert_called_once_with(b'frame', 640, 400, 100, 80)  # consistent: yes
+        self.meta.source_check.reset_mock()
+        self.clock.t += 60
+        old = self.task(clicks(), crop_jpeg=b'after')
+        old['record']['epoch'] -= 120            # a backlog: this sound is two minutes old
+        e.process(old)
+        self.meta.source_check.assert_not_called()
+        self.meta.classify_sound.assert_not_called()
+
     def test_off_screen_sound_is_labeled_from_the_spectrogram_only(self):
         e = self.enricher()
         e.process(self.task(clicks()))  # no crop: the camera cannot see it

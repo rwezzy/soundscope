@@ -184,6 +184,28 @@ class Viewer(unittest.TestCase):
             self.assertNotIn('crop_kind', task)  # lit room: the real camera crop
             session.close()
 
+    def test_late_results_are_saved_but_not_drawn(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(sm, 'MEMORY_DIR', aim.Path(folder)),                 mock.patch.object(sm, 'REFERENCES_DIR', aim.Path(folder) / 'refs'):
+            cfg = aim.load_config(profile='tripod')
+            session = scope.Session(SimpleNamespace(memory=True), cfg, {'note': ''})
+            fix = {'direction': aim.camera_to_array([0.0, 0, 1.0], cfg), 'z': 30.0, 'snr_db': 18.0, 'seconds': 0.4}
+            view = {'spot': (60, 40), 'point': np.array([0.0, 0.0, 1.0]), 'measured': True,
+                    'quality': {'state': 'candidate'}}
+            rec = session.record({'kind': 'sound', 'fix': fix, 'event_id': 1, 'observed_at': scope.time.monotonic(),
+                                  'wav': sm_wav()}, view, np.zeros((80, 120, 3), np.uint8))
+            session.results.append((rec['id'], 'label', rec))
+            session.drain(now=10.0)
+            self.assertEqual(len(session.captions), 1)            # fresh: drawn at its pixel
+            session.captions.clear()
+            session.memory.update(rec['id'], {'epoch': rec['epoch'] - 60})
+            session.results.append((rec['id'], 'label', rec))
+            session.results.append((rec['id'], 'outline', {'polygons': [np.array([[1, 1], [9, 1], [9, 9]])],
+                                                            'scale': 1.0}))
+            session.drain(now=11.0)
+            self.assertEqual(session.captions, [])                # a minute late: not on the live picture
+            self.assertEqual(session.outlines, [])
+            session.close()
+
     def test_dashboard_draws_status_captions_and_outline(self):
         frame = np.full((200, 320, 3), 60, np.uint8)
         view = {'time': 10.0, 'final': True, 'spot': (160, 100), 'quality': {'state': 'candidate'},

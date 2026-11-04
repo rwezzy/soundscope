@@ -64,6 +64,7 @@ class Enricher(threading.Thread):
         self.exhausted = None    # budget message once the budget is used up
         self.last_error = 0.0
         self.watch = []          # sounds to alert on; replaced (not mutated) by the viewer
+        self.max_age_s = 45.0    # older sounds get no Meta request
         self.limits['source'] = RateLimit(*source_limit, clock=clock)
 
     # -- queueing --------------------------------------------------------------------------------
@@ -124,6 +125,8 @@ class Enricher(threading.Thread):
     def process(self, task):
         record = task['record']
         rid = record['id']
+        # A backlog formed (many sounds at once): old sounds keep their free label only.
+        stale = time.time() - record.get('epoch', time.time()) > self.max_age_s
         acoustic = record.get('acoustic') or {}
         wav = task.get('wav')
         speechy = acoustic.get('speech_score', 0) >= SPEECH_SCORE and record.get('duration_s', 0) >= 0.5
@@ -136,6 +139,8 @@ class Enricher(threading.Thread):
                 self._update(rid, {'sound': {'local_label': label, 'local_similarity': similarity}}, 'label')
                 if similarity >= 0.9:
                     self._alerts(rid, [w for w in watch if _same_sound(w, label)], 'your example')
+        if stale:
+            return
 
         strong = (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or \
             ((record.get('loudness') or {}).get('snr_db') or 0) >= 6
@@ -164,6 +169,8 @@ class Enricher(threading.Thread):
                 self.context_cache[self._cell(record)] = (self.clock(), {'near': patch['near']})
                 self._update(rid, patch, 'source')
                 self._alerts(rid, reply.get('watch') or [], 'Muse Spark')
+                if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None:
+                    task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1)
         if (wav and strong and not speechy and not checked and (not trusted_local or watch)
                 and self._meta_ok('identify')):
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
