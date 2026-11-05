@@ -517,7 +517,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     hints = ([('ENTER', 'apply'), ('ESC', 'cancel'), ('C', 'restart'), ('H', 'heatmap'), ('S', 'snapshot'), ('Q', 'quit')]
              if calibration_active else
              [('V', 'voice'), ('L', 'last sounds'), ('C', 'calibrate'), ('H', 'heatmap'), ('D', 'diagnostics'),
-              ('SPACE', 'resume' if paused else 'pause'), ('S', 'snapshot'), ('Q', 'quit')])
+              ('SPACE', 'resume' if paused else 'pause'), ('S', 'snapshot'), ('F', 'full screen'), ('Q', 'quit')])
     cursor = p(24)
     for key, action in hints:
         key_width = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, 0.32 * s, 1)[0][0] + p(12)

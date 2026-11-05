@@ -983,6 +983,8 @@ def run(args, cfg):
         loc = Localizer()
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
         cv2.resizeWindow(WINDOW, *viewport)
+        if getattr(args, 'fullscreen', False):  # best for filming; F toggles
+            cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.setMouseCallback(WINDOW, on_mouse)
         say(ui, ui['note'])
         started = last_frame_at = time.monotonic()
@@ -1126,6 +1128,10 @@ def run(args, cfg):
                     view, latest, evidence_frame = None, None, None
                 except (OSError, ValueError) as exc:
                     say(ui, f'Could not save calibration: {exc}')
+            elif key == ord('f'):
+                full = cv2.getWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN) == cv2.WINDOW_FULLSCREEN
+                cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_NORMAL if full else cv2.WINDOW_FULLSCREEN)
             elif key == ord('h'):
                 heatmap = not heatmap
             elif key == ord('d'):
@@ -1176,6 +1182,7 @@ def main():
     p.add_argument('--no-memory', dest='memory', action='store_false', help='do not save heard sounds')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
     p.add_argument('--seconds', type=float, help='stop after this long')
+    p.add_argument('--fullscreen', action='store_true', help='start full screen (press F to toggle)')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
     p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
