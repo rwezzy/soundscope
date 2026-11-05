@@ -203,7 +203,7 @@ class Dashboard(unittest.TestCase):
                                           search_text=query, diagnostics=True)
                 np.testing.assert_array_equal(self.camera(out), self.frame)
                 labels = [str(call.args[1]) for call in text.call_args_list]
-                for label in ('SEARCH SOUND HISTORY', 'ENTER', 'search', 'ESC', 'cancel', 'BACKSPACE'):
+                for label in ('SEARCH SOUND HISTORY', 'Search', 'Cancel', 'Delete'):
                     self.assertIn(label, labels)
                 self.assertNotIn('Prior note', labels)
                 self.assertNotIn('DIAGNOSTICS', labels)
@@ -260,7 +260,7 @@ class Dashboard(unittest.TestCase):
         with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
             result = scope_ui.render(self.frame, None, '', '', now=10, recent_events=events)
         labels = [str(call.args[1]) for call in text.call_args_list]
-        self.assertIn('RECENT EVENTS / B TO BROWSE', labels)
+        self.assertIn('RECENT EVENTS / CLICK TO OPEN', labels)
         self.assertIn('22:01:02', labels)
         self.assertIn('Ringing', labels)
         np.testing.assert_array_equal(self.camera(result), self.frame)
@@ -361,7 +361,7 @@ class Dashboard(unittest.TestCase):
                     scope_ui.render(self.frame, self.view, '', note, now=10, calibration_active=True)
                 self.assertIn(note, [call.args[0] for call in wrap.call_args_list])
                 labels = [str(call.args[1]) for call in text.call_args_list]
-                for required in ('ENTER', 'apply', 'ESC', 'cancel'):
+                for required in ('Apply calibration', 'Cancel', 'Restart'):
                     self.assertIn(required, labels)
 
     def test_visible_controls_map_to_actions_outside_camera(self):
@@ -414,14 +414,110 @@ class Dashboard(unittest.TestCase):
             out = scope_ui.render(self.frame, None, '', '', now=10, search_text='My desk timer', entry_kind='label')
         labels = [str(call.args[1]) for call in text.call_args_list]
         self.assertIn('NAME SAVED SOUND', labels)
-        self.assertIn('ENTER saves your label / ESC cancels / does not train recognition', labels)
+        self.assertIn('Saved label only; does not train recognition.', labels)
         self.assertNotIn('SEARCH SOUND HISTORY', labels)
         np.testing.assert_array_equal(self.camera(out), self.frame)
         with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
             scope_ui.render(self.frame, None, '', '', now=10, show_help=True)
         labels = [str(call.args[1]) for call in text.call_args_list]
         self.assertIn('Make sense of a sound.', labels)
-        self.assertIn('? to close help', labels)
+        self.assertIn('Close', labels)
+
+    def test_live_buttons_expose_actions_without_keyboard_badges(self):
+        from unittest.mock import patch
+        actions = ('voice', 'analyze', 'calibrate', 'heatmap', 'pause', 'fullscreen', 'snapshot', 'quit')
+        for action in actions:
+            self.assertIn(action, scope_ui.control_rects(self.frame.shape, (1280, 720)))
+        with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+            scope_ui.render(self.frame, None, '', '', now=10, viewport_size=(1280, 720))
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        for label in ('Voice', 'Analyze sound', 'Calibrate', 'Heatmap', 'Pause', 'Fullscreen', 'Snapshot', 'Finish'):
+            self.assertIn(label, labels)
+        for badge in ('V', 'T', 'B', 'C', 'H', 'M', 'X', 'F', 'Q', '[ ]'):
+            self.assertNotIn(badge, labels)
+
+    def test_context_controls_and_modal_help_do_not_trigger_hidden_actions(self):
+        viewport = (1280, 720)
+        for options in ({'search_text': ''}, {'calibration_active': True}, {'show_help': True}):
+            rects = scope_ui.control_rects(self.frame.shape, viewport, **options)
+            for action, (x, y, w, h) in rects.items():
+                self.assertEqual(scope_ui.control_hit_test(x + w / 2, y + h / 2,
+                    self.frame.shape, viewport, **options), action)
+            self.assertNotIn('voice', rects)
+        x, y, w, h = scope_ui.control_rects(self.frame.shape, viewport)['voice']
+        self.assertIsNone(scope_ui.control_hit_test(x + w / 2, y + h / 2,
+            self.frame.shape, viewport, show_help=True))
+
+    def test_meta_status_uses_only_supplied_state_and_preserves_camera(self):
+        from unittest.mock import patch
+        for phase, expected in (('off', 'OFF'), ('processing', 'PROCESSING'), ('budget', 'PAUSED')):
+            supplied = {'phase': phase, 'text': 'Actual controller state', 'transcript': 'Find the ringing phone'}
+            original = copy.deepcopy(supplied)
+            with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+                out = scope_ui.render(self.frame, None, '', '', now=10, ai_status=supplied)
+            labels = [str(call.args[1]) for call in text.call_args_list]
+            self.assertIn('META AI', labels)
+            self.assertIn(expected, labels)
+            self.assertIn('Actual controller state', labels)
+            self.assertIn('LATEST TRANSCRIPT', labels)
+            self.assertIn('Find the ringing phone', labels)
+            self.assertEqual(supplied, original)
+            np.testing.assert_array_equal(self.camera(out), self.frame)
+
+    def test_recent_transcript_precedes_generic_speech_label(self):
+        from unittest.mock import patch
+        event = {'id': 'spoken', 'time': '2026-11-04T23:31:40-05:00',
+                 'speech': {'text': 'Hello there', 'speaker': 'Speaker 1'},
+                 'sound': {'label': 'Speech', 'source': 'model'}}
+        with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+            scope_ui.render(self.frame, None, '', '', now=10, recent_events=[event])
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertTrue(any('Hello there' in label for label in labels))
+        self.assertTrue(any('Speaker 1:' in label for label in labels))
+        self.assertNotIn('Speech', labels)
+
+    def test_transcript_never_replaces_calibration_or_search_fields(self):
+        from unittest.mock import patch
+        for extra, heading in (({'search_text': ''}, 'SEARCH SOUND HISTORY'),
+                               ({'calibration_active': True}, 'CALIBRATION')):
+            with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+                scope_ui.render(self.frame, None, '', 'Keep this context', now=10,
+                                ai_status={'phase': 'idle', 'transcript': 'Saved words'}, **extra)
+            labels = [str(call.args[1]) for call in text.call_args_list]
+            self.assertIn(heading, labels)
+            self.assertNotIn('LATEST TRANSCRIPT', labels)
+
+    def test_enabled_transcripts_show_waiting_panel_without_hiding_notices(self):
+        from unittest.mock import patch
+        for viewport in (None, (1280, 720)):
+            with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text, \
+                 patch.object(scope_ui, '_wrap', wraps=scope_ui._wrap) as wrap:
+                out = scope_ui.render(self.frame, None, '', 'Microphone warning: check input level.',
+                    now=10, viewport_size=viewport,
+                    ai_status={'phase': 'idle', 'features': ['Sound labels', 'Transcripts']})
+            labels = [str(call.args[1]) for call in text.call_args_list]
+            self.assertIn('LATEST TRANSCRIPT', labels)
+            self.assertIn('Listening for speech. Captions appear after a short pause.',
+                          [call.args[0] for call in wrap.call_args_list])
+            self.assertIn('Microphone warning: check input level.', labels)
+            np.testing.assert_array_equal(scope_ui.camera_rgb_crop(out, self.frame.shape, viewport),
+                scope_ui.camera_rgb_crop(scope_ui.render(self.frame, None, '', '', now=10,
+                    viewport_size=viewport), self.frame.shape, viewport))
+
+    def test_waiting_transcripts_respect_paused_state_and_preserve_real_words(self):
+        from unittest.mock import patch
+        for phase, expected in (('budget', 'No transcript yet. Transcription is paused.'),
+                                ('error', 'No transcript yet. Check the Meta AI status.')):
+            with patch.object(scope_ui, '_wrap', wraps=scope_ui._wrap) as wrap:
+                scope_ui.render(self.frame, None, '', '', now=10,
+                    ai_status={'phase': phase, 'features': ['Transcripts']})
+            self.assertIn(expected, [call.args[0] for call in wrap.call_args_list])
+        with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+            scope_ui.render(self.frame, None, '', '', now=10,
+                ai_status={'phase': 'budget', 'features': ['Transcripts'], 'transcript': '00:21:04 Actual saved words'})
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertIn('00:21:04 Actual saved words', labels)
+        self.assertNotIn('No transcript yet. Transcription is paused.', labels)
 
     def test_style_controls_preserve_stale_and_weak_evidence_rules(self):
         for style in scope_ui.HEATMAP_STYLES:

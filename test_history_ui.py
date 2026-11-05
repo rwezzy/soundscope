@@ -43,7 +43,7 @@ class History(unittest.TestCase):
                     self.assertLessEqual(x + w, viewport[0])
                     self.assertLessEqual(y + h, viewport[1])
                     self.assertEqual(history_ui.hit_test(x + w / 2, y + h / 2, viewport, 14, selected), ('select', index))
-                for name in ('live', 'play'):
+                for name in ('live', 'play', 'analyze', 'name', 'search'):
                     x, y, w, h = layout[name]
                     self.assertEqual(history_ui.hit_test(x + w / 2, y + h / 2, viewport, 14, selected), (name, None))
                 if selected >= 6:
@@ -77,15 +77,49 @@ class History(unittest.TestCase):
 
     def test_historical_labels_never_claim_a_live_verified_source(self):
         item = event()
-        with patch.object(history_ui, '_text', wraps=history_ui._text) as text:
+        with patch.object(history_ui, '_text', wraps=history_ui._text) as text, \
+                patch.object(history_ui, '_button', wraps=history_ui._button) as buttons:
             history_ui.render_history([item], now=1700000100, search_query='phone ring', search_result_count=1)
         labels = [str(call.args[1]) for call in text.call_args_list]
-        for required in ('RECORDED EVENT', 'HISTORICAL / NOT LIVE', '1 MATCHING EVENTS', 'E  PLAY SAVED AUDIO'):
+        for required in ('RECORDED EVENT', 'HISTORICAL / NOT LIVE', '1 MATCHING EVENTS'):
             self.assertIn(required, labels)
+        self.assertIn(('play', 'Play audio'), [(call.args[2], call.args[3]) for call in buttons.call_args_list])
         self.assertTrue(any('source identity unverified' in label for label in labels))
         self.assertTrue(any('candidate surface 1.20 m' in label for label in labels))
         self.assertTrue(any('relative to estimated room noise' in label for label in labels))
         self.assertNotIn('CAMERA LIVE', labels)
+
+    def test_header_actions_are_disjoint_and_selection_actions_disable_without_events(self):
+        for viewport in ((640, 360), (1280, 720), (800, 600), (1920, 1080)):
+            layout = history_ui.layout_positions(viewport, 0)
+            previous_right = 0
+            for action in ('analyze', 'name', 'search', 'live'):
+                x, y, w, h = layout[action]
+                self.assertGreaterEqual(x, previous_right)
+                self.assertLessEqual(x + w, viewport[0])
+                self.assertLessEqual(y + h, viewport[1])
+                previous_right = x + w
+                actual = history_ui.hit_test(x + w / 2, y + h / 2, viewport, 0)
+                self.assertEqual(actual, None if action in ('analyze', 'name') else (action, None))
+
+    def test_actions_are_visible_icon_buttons_and_actual_transcript_is_preserved(self):
+        item = event()
+        item['speech'] = {'text': 'A transcript supplied by this recorded event.'}
+        with patch.object(history_ui, '_button', wraps=history_ui._button) as buttons, \
+                patch.object(history_ui, '_text', wraps=history_ui._text) as text:
+            history_ui.render_history([item], now=1700000100)
+        icon_labels = [(call.args[2], call.args[3]) for call in buttons.call_args_list]
+        for control in (('analyze', 'Analyze'), ('name', 'Name'), ('search', 'Search'),
+                        ('live', 'Live view'), ('play', 'Play audio'),
+                        ('previous', 'Prev'), ('next', 'Next')):
+            self.assertIn(control, icon_labels)
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertIn('TRANSCRIPT  A transcript supplied by this recorded event.', labels)
+        self.assertNotIn('B  RETURN TO LIVE', labels)
+        self.assertNotIn('E  PLAY SAVED AUDIO', labels)
+        with patch.object(history_ui, '_text', wraps=history_ui._text) as text:
+            history_ui.render_history([event()], now=1700000100)
+        self.assertFalse(any(str(call.args[1]).startswith('TRANSCRIPT') for call in text.call_args_list))
 
     def test_missing_and_late_frames_cannot_gain_a_marker(self):
         for image, valid in ((None, True), (synthetic_scene(640, 360), False)):
@@ -130,7 +164,33 @@ class History(unittest.TestCase):
             labels = [str(call.args[1]) for call in text.call_args_list]
             self.assertIn('SEARCH SOUND HISTORY', labels)
             self.assertIn('RECORDED EVENT', labels)
-            self.assertIn('ENTER search    ESC cancel    BACKSPACE delete', labels)
+            self.assertIn('Search recorded sounds / Cancel to return', labels)
+            self.assertEqual(image.shape, (720, 1280, 3))
+
+    def test_editor_buttons_use_scaled_shared_geometry_and_block_background_actions(self):
+        for viewport in ((640, 360), (1280, 720), (800, 600), (1920, 1080)):
+            layout = history_ui.layout_positions(viewport, 10, 6)
+            for query in ('', 'ring'):
+                for action in ('submit', 'cancel', 'delete'):
+                    x, y, w, h = layout['editor_' + action]
+                    self.assertEqual(history_ui.hit_test(x + w / 2, y + h / 2, viewport,
+                                                        10, 6, search_text=query), (action, None))
+                for action in ('live', 'play', 'analyze', 'name', 'search'):
+                    x, y, w, h = layout[action]
+                    self.assertIsNone(history_ui.hit_test(x + w / 2, y + h / 2, viewport,
+                                                         10, 6, search_text=query))
+                _, (x, y, w, h) = layout['rows'][0]
+                self.assertIsNone(history_ui.hit_test(x + w / 2, y + h / 2, viewport,
+                                                     10, 6, search_text=query))
+
+    def test_search_and_label_editors_have_visible_submit_cancel_delete_icons(self):
+        for kind, label in (('search', 'Search'), ('label', 'Save label')):
+            with patch.object(history_ui, '_button', wraps=history_ui._button) as buttons:
+                image = history_ui.render_history([event()], now=1700000100,
+                                                  search_text='doorbell', entry_kind=kind)
+            controls = [(call.args[2], call.args[3]) for call in buttons.call_args_list]
+            for action in (('submit', label), ('cancel', 'Cancel'), ('delete', 'Delete')):
+                self.assertIn(action, controls)
             self.assertEqual(image.shape, (720, 1280, 3))
 
 

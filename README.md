@@ -187,8 +187,11 @@ prove general room-scale localization or sound classification accuracy.
 ## Live display controls
 
 The default dashboard uses neutral black/charcoal with small pink and yellow accents, and the
-original smooth cyan-to-amber heatmap at 44% opacity.
-Click the appearance controls or use **X** to cycle smooth, bands, contours and spotlight;
+classic cyan-to-amber gradient plus a thin acoustic-support boundary at 44% opacity.
+The boundary follows the measured support mask, including broad or split regions; it is not
+an object-segmentation claim. Click the icon controls to speak, analyze a saved sound,
+search, browse history, calibrate, pause or change display settings.
+Keyboard alternatives remain in Help: **X** cycles classic, smooth, bands, contours and spotlight;
 **M** changes palette and **[ / ]** lowers/raises opacity. These controls change presentation,
 not sound sensitivity or source coordinates. Weak estimates use faint diffuse shading rather
 than precise-looking contours. Broad or multiple regions remain unresolved.
@@ -197,6 +200,19 @@ Click a recent-event card or press **B** for its recorded image/audio. **R** ope
 saved event. **N** lets you name a saved event: this is stored as **Your label**, separately
 from the AI estimate, and becomes searchable. It does not train recognition or label future
 sounds automatically. **T** searches, **E** replays selected audio, and **?** shows help.
+
+The Meta card reports actual enabled features, pending model work, empty results, errors and
+budget pauses. The latest returned transcript remains visible after its temporary camera bubble
+expires; transcript text also appears in recent-event cards and saved history. Automatic Meta
+features are off in a plain launch. Use `demo.ps1 -UseMeta -EnvFile <your-env-file>` or `--meta`
+to enable them; `--assist` additionally enables the watch alerts. A configured key alone does not
+enable automatic captions. Clear direction is still not guaranteed, and weak/ambiguous recordings
+can be skipped by the existing evidence/spending gates; Analyze is available for saved evidence.
+Low raw-microphone gain does not automatically suppress captions: a finished speech-like event
+with at least 3 dB above the learned room noise can use the separate processed speech channel.
+That exception enables transcription only, preserves rate/budget limits, and never relaxes the
+checks for camera uploads, sound labels or object outlines. Captions arrive after the event ends
+and the API returns; they are not word-by-word streaming captions.
 
 The original comparison version remains separate; the display update preserves the newer
 audio capture, budget controls and saved-evidence safeguards.

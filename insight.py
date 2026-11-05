@@ -19,11 +19,13 @@ An object remains an unverified candidate even when a model agrees with it.
 
 Results go into the sound memory and to on_result(record_id, kind, payload) for the screen.
 """
+import io
 import math
 import os
 import re
 import threading
 import time
+import wave
 
 from meta_api import BudgetError, MetaError
 from sound_memory import SPEECH_SCORE, SpeakerMap, direction_words, turn_directions, wav_samples
@@ -47,6 +49,15 @@ META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no 
 # Quiet recordings remain available locally; explicit analysis can override this
 # digital floor, but never spatial-evidence, rate, or budget checks.
 AUTO_META_MIN_PEAK_DBFS = -50.0
+_ACTIVITY_LABELS = {
+    'source_check': 'Muse Spark: sound and scene',
+    'classify_sound': 'Muse Spark: sound label',
+    'transcribe_turns': 'Muse Voice: transcript',
+    'describe_near': 'Muse Spark: scene context',
+    'segment_at': 'SAM 3.1: outline',
+}
+_STEP_OPERATIONS = {'source': 'source_check', 'identify': 'classify_sound',
+                    'captions': 'transcribe_turns', 'context': 'describe_near', 'outline': 'segment_at'}
 PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
                     re.IGNORECASE)
 
@@ -140,6 +151,11 @@ class Enricher(threading.Thread):
         self.watch = []          # sounds to alert on; replaced (not mutated) by the viewer
         self.max_age_s = 45.0    # older sounds get no Meta request
         self.alerted = {}        # watched sound -> when it last raised an alert
+        self._activity_lock = threading.Lock()
+        self._activity_active = {}
+        self._activity_counts = {key: 0 for key in ('started', 'completed', 'empty', 'errors', 'blocked', 'skipped')}
+        self._activity_last = {'state': 'idle', 'operation': None, 'label': 'Meta analysis',
+                               'message': 'Waiting for an eligible sound.', 'at': self.clock()}
         self.limits['source'] = RateLimit(*source_limit, clock=clock)
         try:
             self.auto_meta_min_peak_dbfs = float(os.environ.get(
@@ -154,6 +170,61 @@ class Enricher(threading.Thread):
     def submit(self, task):
         """Never blocks the caller; when full, the oldest waiting task is dropped."""
         self.tasks.put(task)
+
+    def activity_status(self):
+        """Cheap, thread-safe UI snapshot. No request, ledger read or callback.
+
+        `started` counts attempted model-method calls, including attempts the
+        budget refuses before HTTP; it is not a billing/request-success count.
+        Concurrent operations appear separately even when they use one model.
+        """
+        queued = self.tasks.qsize()
+        with self._activity_lock:
+            operations = list(self._activity_active.values())
+            return {'queued': queued, 'active_operations': operations,
+                    'active': [_ACTIVITY_LABELS.get(op, 'Meta analysis') for op in operations],
+                    **self._activity_counts, 'last': dict(self._activity_last),
+                    'budget_paused': self.exhausted is not None}
+
+    def _activity_note(self, state, operation, message, token=None):
+        operation = _STEP_OPERATIONS.get(operation, operation)
+        counter = {'complete': 'completed', 'empty': 'empty', 'error': 'errors',
+                   'blocked': 'blocked', 'skipped': 'skipped'}.get(state)
+        with self._activity_lock:
+            if token is not None:
+                self._activity_active.pop(token, None)
+            if counter:
+                self._activity_counts[counter] += 1
+            self._activity_last = {'state': state, 'operation': operation,
+                                   'label': _ACTIVITY_LABELS.get(operation, 'Meta analysis'),
+                                   'message': str(message)[:320], 'at': self.clock()}
+
+    def _activity_begin(self, fn):
+        operation = getattr(fn, '__name__', None)
+        if not isinstance(operation, str) or operation not in _ACTIVITY_LABELS:
+            operation = next((name for name in _ACTIVITY_LABELS
+                              if fn is getattr(self.meta, name, None)), 'analysis')
+        with self._activity_lock:
+            self._activity_counts['started'] += 1
+            token = self._activity_counts['started']
+            self._activity_active[token] = operation
+            label = _ACTIVITY_LABELS.get(operation, 'Meta analysis')
+            self._activity_last = {'state': 'running', 'operation': operation, 'label': label,
+                                   'message': label + ' in progress.', 'at': self.clock()}
+        return token, operation
+
+    @staticmethod
+    def _activity_has_result(operation, reply):
+        if operation == 'transcribe_turns':
+            return isinstance(reply, dict) and any(
+                isinstance(turn, dict) and isinstance(turn.get('text'), str) and turn['text'].strip()
+                for turn in reply.get('turns') or ())
+        key = {'source_check': 'sound', 'classify_sound': 'label', 'describe_near': 'near'}.get(operation)
+        if key:
+            return isinstance(reply, dict) and isinstance(reply.get(key), str) and bool(reply[key].strip())
+        if operation == 'segment_at':
+            return reply is not None and len(reply) > 0
+        return reply is not None
 
     def automatic_audio_eligible(self, record):
         """Pure spend-policy check using the raw input peak, never normalised WAV samples.
@@ -176,6 +247,43 @@ class Enricher(threading.Thread):
         before spending. Explicit historical requests use their separate path.
         """
         return self.automatic_audio_eligible(record) and usable_visual_evidence(record)
+
+    def automatic_caption_eligible(self, record, speech_wav):
+        """Allow only processed-speech ASR when a low-gain raw input fails the peak floor.
+
+        The XVF3800 speech output has different gain/processing from its raw
+        microphone channels. A raw dBFS floor must not veto otherwise audible
+        speech on that separate channel. Require the existing speech/tone test,
+        a finished >=0.5 s event, finite raw level above digital silence, and at
+        least 3 dB event SNR over the learned room. Rates and budget still apply.
+        This never enables sound classification, camera context, or segmentation.
+        """
+        if not isinstance(speech_wav, (bytes, bytearray)) or not speech_wav:
+            return False
+        try:
+            loud = record.get('loudness') or {}
+            values = (record.get('duration_s'), loud.get('snr_db'), loud.get('peak_dbfs'))
+            if any(isinstance(value, bool) for value in values):
+                return False
+            duration, snr, peak = (float(value) for value in values)
+            valid = (all(math.isfinite(value) for value in (duration, snr, peak))
+                     and duration >= 0.5 and snr >= META_MIN_SNR_DB and -120.0 < peak <= 0.0
+                     and likely_speech(record.get('acoustic') or {}))
+            if not valid:
+                return False
+            # Inspect the real processed clip, not its normalized peak as a
+            # loudness estimate. Reject missing/truncated/digital-silence audio.
+            with wave.open(io.BytesIO(speech_wav)) as stream:
+                frames = stream.getnframes()
+                if (stream.getnchannels(), stream.getsampwidth(), stream.getframerate()) != (1, 2, 16000) \
+                        or not 8000 <= frames <= 160000:
+                    return False
+                if len(stream.readframes(frames)) != frames * 2:
+                    return False
+            samples = wav_samples(speech_wav)
+            return bool(samples.size and samples.max() > samples.min())
+        except (TypeError, ValueError, OverflowError, AttributeError, wave.Error, EOFError):
+            return False
 
     def start(self):
         super().start()
@@ -215,6 +323,7 @@ class Enricher(threading.Thread):
             reason = f'The {step} rate limit is active; wait before requesting this event again.'
         else:
             return True
+        self._activity_note('blocked', step, reason)
         if on_block is not None:
             on_block(reason)
         return False
@@ -241,15 +350,27 @@ class Enricher(threading.Thread):
             self.on_result(rid, 'alert', {'watch': item, 'how': how})
 
     def _call(self, record_id, fn, *args):
+        token, operation = self._activity_begin(fn)
         try:
-            return fn(*args)
+            reply = fn(*args)
+            usable = self._activity_has_result(operation, reply)
+            message = ('Result received.' if usable else
+                       'No speech was transcribed.' if operation == 'transcribe_turns' else
+                       'No usable result was returned.')
+            self._activity_note('complete' if usable else 'empty', operation, message, token)
+            return reply
         except BudgetError as exc:
             self.exhausted = str(exc)
+            self._activity_note('blocked', operation, f'Estimated budget paused: {exc}', token)
             self.on_result(record_id, 'notice', f'Meta features paused: {exc}')
         except MetaError as exc:
+            self._activity_note('error', operation, str(exc), token)
             if self.clock() - self.last_error > 10:
                 self.last_error = self.clock()
                 self.on_result(record_id, 'notice', f'Meta call failed: {exc}')
+        except Exception as exc:
+            self._activity_note('error', operation, str(exc), token)
+            raise
         return None
 
     def _update(self, record_id, patch, kind, payload=None):
@@ -293,12 +414,23 @@ class Enricher(threading.Thread):
                 if similarity >= 0.9:
                     self._alerts(rid, record, [w for w in watch if _same_sound(w, label)], 'your example')
         if stale:
+            self._activity_note('skipped', 'analysis', 'Analysis skipped: request is stale or its time is invalid.')
             if explicit:
                 manual_notice('request expired or its request time is invalid; press A again.')
             return
 
-        if not explicit and not self.automatic_audio_eligible(record):
+        audio_allowed = explicit or self.automatic_audio_eligible(record)
+        caption_only = (not audio_allowed and
+                        self.automatic_caption_eligible(record, task.get('speech_wav')))
+        if not audio_allowed and not caption_only:
+            self._activity_note('skipped', 'analysis',
+                                'Automatic analysis skipped: raw recording peak is below the configured floor '
+                                'or its level is unavailable. Saved-event analysis is still available.')
             return  # free matching and local memory remain available
+        if caption_only:
+            self._activity_note('eligible', 'transcribe_turns',
+                                'Processed speech is above the room noise: captions only. '
+                                'Other automatic models remain blocked by the raw recording-level floor.')
 
         visual = usable_visual_evidence(record)
 
@@ -317,7 +449,7 @@ class Enricher(threading.Thread):
                  else None)
         crop = task.get('crop_jpeg')
         checked = False
-        if (wav and crop is not None and visual and strong and not speech_like and (not trusted_local or watch)
+        if (audio_allowed and wav and crop is not None and visual and strong and not speech_like and (not trusted_local or watch)
                 and self._meta_ok('source', ('identify', 'context'))):
             reply = self._call(rid, self.meta.source_check, wav, crop, task.get('crop_before'), facts, watch, sheet,
                                task.get('crop_kind', 'color'))
@@ -340,7 +472,7 @@ class Enricher(threading.Thread):
                 person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
                 if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
                     task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
-        if (not explicit and wav and strong and not speech_likely and not checked and (not trusted_local or watch)
+        if (audio_allowed and not explicit and wav and strong and not speech_likely and not checked and (not trusted_local or watch)
                 and self._meta_ok('identify')):
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
             if reply:
@@ -367,12 +499,28 @@ class Enricher(threading.Thread):
                          and isinstance(turn.get('text'), str) and turn['text'].strip()]
             if turns:
                 captioned = True
-                azimuths = turn_directions(turns, task.get('track') or [], task.get('clip_end_at', 0.0),
-                                           task.get('clip_seconds', 0.0))
-                fallback = (record.get('where') or {}).get('azimuth_deg')
+                where = record.get('where') or {}
+                # An intelligible processed recording is not evidence of a
+                # reliable location. Weak/ambiguous fixes must not create a
+                # persistent direction-based speaker name or caption position.
+                direction_usable = (where.get('quality') == 'candidate' and
+                                    not where.get('directional_ambiguous') and
+                                    not record.get('directional_ambiguous') and
+                                    not any(isinstance(fix, dict) and fix.get('directional_ambiguous')
+                                            for fix in (record.get('fix'), task.get('fix'))))
+                azimuths = (turn_directions(turns, task.get('track') or [], task.get('clip_end_at', 0.0),
+                                            task.get('clip_seconds', 0.0))
+                            if direction_usable else [None] * len(turns))
+                fallback = where.get('azimuth_deg') if direction_usable else None
                 out = []
                 for turn, az in zip(turns, azimuths):
                     az = fallback if az is None else az
+                    try:
+                        az = float(az) if az is not None and not isinstance(az, bool) else None
+                        if az is not None and not math.isfinite(az):
+                            az = None
+                    except (TypeError, ValueError, OverflowError):
+                        az = None
                     out.append({**turn, 'azimuth_deg': None if az is None else round(az, 1),
                                 'name': self._speaker(az), 'where': direction_words(az)})
                 main = max(out, key=lambda t: t['end_s'] - t['start_s'])
@@ -408,7 +556,7 @@ class Enricher(threading.Thread):
 
         # Context alone only when the combined source check is not in use (no double spending), and
         # never for speech: the caption says enough, and the crop would show the person talking.
-        if (crop is not None and visual and 'context' in self.features and 'identify' not in self.features
+        if (audio_allowed and crop is not None and visual and 'context' in self.features and 'identify' not in self.features
                 and not checked and not speech_like):
             key = self._cell(record)
             cached = self.context_cache.get(key)
@@ -424,7 +572,7 @@ class Enricher(threading.Thread):
                     self.context_cache[key] = (self.clock(), patch)
                     self._update(rid, patch, 'context')
 
-        if visual and task.get('outline') and task.get('frame_jpeg') is not None and not speech_like \
+        if audio_allowed and visual and task.get('outline') and task.get('frame_jpeg') is not None and not speech_like \
                 and self._meta_ok('outline'):
             w, h = task['frame_size']
             u, v = task['pixel']

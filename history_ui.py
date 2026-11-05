@@ -11,7 +11,8 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-from scope_ui import BG, PANEL, LINE, TEXT, MUTED, CYAN, AMBER, _text, _fit, _wrap, _round_rect, _clean, _width
+from scope_ui import (BG, PANEL, LINE, TEXT, MUTED, CYAN, AMBER, _text, _fit,
+                      _wrap, _round_rect, _clean, _width, _button)
 
 PAGE_SIZE = 6
 
@@ -43,22 +44,39 @@ def layout_positions(viewport_size=(1280, 720), event_count=0, selected=0):
             for row, index in enumerate(range(start, min(start + PAGE_SIZE, count)))]
     return {'width': width, 'height': height, 'scale': s, 'offset': (ox, oy),
             'selected': selection, 'page_start': start, 'rows': rows,
+            'analyze': rect(648, 26, 124, 42), 'name': rect(788, 26, 120, 42),
+            'search': rect(924, 26, 132, 42),
             'live': rect(1076, 26, 180, 42), 'play': rect(1062, 632, 194, 40),
+            'editor_submit': rect(780, 410, 144, 34),
+            'editor_cancel': rect(936, 410, 120, 34),
+            'editor_delete': rect(1072, 410, 136, 34),
             'image_area': rect(400, 164, 840, 300),
             'previous': rect(24, 640, 76, 32), 'next': rect(284, 640, 76, 32)}
 
 
-def hit_test(x, y, viewport_size=(1280, 720), event_count=0, selected=0):
-    """Return ('select', absolute_index), ('live'/'play', None), or None.
+def hit_test(x, y, viewport_size=(1280, 720), event_count=0, selected=0, *, search_text=None):
+    """Return ('select', index), (action, None), or None.
 
     Play availability must also be checked by the caller. Page arrows select the
-    first record of the adjacent page; no record is modified.
+    first record of the adjacent page; no record is modified. Header actions are
+    live, analyze, name and search; analyze/name require an existing event.
+    With an open editor, only submit/cancel/delete are actionable; clicking a
+    record behind the editor cannot silently change the sound being named.
     """
     layout = layout_positions(viewport_size, event_count, selected)
     inside = lambda r: r[0] <= x < r[0] + r[2] and r[1] <= y < r[1] + r[3]
-    for action in ('live', 'play'):
+    if search_text is not None:
+        for action in ('submit', 'cancel', 'delete'):
+            if inside(layout['editor_' + action]):
+                return action, None
+        return None
+    for action in ('live', 'play', 'search'):
         if inside(layout[action]):
             return action, None
+    if event_count > 0:
+        for action in ('analyze', 'name'):
+            if inside(layout[action]):
+                return action, None
     for index, rect in layout['rows']:
         if inside(rect):
             return 'select', index
@@ -158,8 +176,10 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
     text = lambda message, x, y, size=.42, color=TEXT, thick=1: _text(out, message, *pt(x, y), size * s, color, thick)
     text('SoundScope', 24, 47, .86, TEXT, max(1, p(2)))
     text('SOUND HISTORY / RECORDED EVIDENCE', 26, 70, .32, MUTED)
-    _round_rect(out, layout['live'], CYAN, p(8))
-    text('B  RETURN TO LIVE', 1091, 53, .4, BG)
+    for action, label in (('analyze', 'Analyze'), ('name', 'Name'), ('search', 'Search')):
+        enabled = bool(events) or action == 'search'
+        _button(out, layout[action], action, label, s, accent=TEXT if enabled else LINE)
+    _button(out, layout['live'], 'live', 'Live view', s, accent=CYAN)
     cv2.line(out, pt(24, 90), pt(1256, 90), LINE, 1)
     query = str(search_query or '')
     result_count = _number(search_result_count)
@@ -189,9 +209,8 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
     start = layout['page_start']
     for name, enabled in [('previous', start > 0), ('next', start + PAGE_SIZE < len(events))]:
         rect = layout[name]
-        _round_rect(out, rect, PANEL, p(6))
-        _text(out, '< PREV' if name == 'previous' else 'NEXT >', rect[0] + p(10), rect[1] + p(21), .32 * s,
-              CYAN if enabled else LINE)
+        _button(out, rect, name, 'Prev' if name == 'previous' else 'Next', s,
+                accent=CYAN if enabled else LINE)
     text(f'{start + 1 if events else 0}-{min(start + PAGE_SIZE, len(events))} of {len(events)}', 128, 661, .34, MUTED)
 
     _round_rect(out, box(384, 106, 872, 510), PANEL, p(12))
@@ -258,8 +277,8 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
         text('Select a saved event to inspect its evidence.', 400, 527, .54, MUTED)
 
     audio = bool(record.get('evidence_audio'))
-    _round_rect(out, layout['play'], CYAN if audio else PANEL, p(8))
-    text('E  PLAY SAVED AUDIO' if audio else 'NO SAVED AUDIO', 1074, 657, .35, BG if audio else MUTED)
+    _button(out, layout['play'], 'play', 'Play audio' if audio else 'No saved audio', s,
+            accent=CYAN if audio else MUTED)
     warning = ('Saved replay may be normalized; playback volume is not the original sound level.' if audio
                else 'Saved locations describe the scene at event time, not its current state.')
     text(_fit(warning, p(642), .31 * s), 400, 646, .31, MUTED)
@@ -268,20 +287,24 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
     if search_text is not None:
         # A transient query editor uses the saved-image panel, never the live
         # scene or record metadata. Caller owns input, submission and API use.
-        _round_rect(out, box(416, 350, 808, 100), PANEL, p(9))
-        _round_rect(out, box(416, 350, 808, 100), CYAN, p(9), 1)
-        text('NAME SAVED SOUND' if entry_kind == 'label' else 'SEARCH SOUND HISTORY', 432, 375, .33, CYAN)
+        _round_rect(out, box(416, 318, 808, 140), PANEL, p(9))
+        _round_rect(out, box(416, 318, 808, 140), CYAN, p(9), 1)
+        text('NAME SAVED SOUND' if entry_kind == 'label' else 'SEARCH SOUND HISTORY', 432, 343, .33, CYAN)
         query_text = _clean(search_text)
         clipped = False
         while query_text and _width(('... ' if clipped else '') + query_text + ' |', .52 * s) > p(768):
             query_text, clipped = query_text[1:], True
         shown = ('... ' if clipped else '') + query_text + ' |' if query_text else ('Your name for this event...' if entry_kind == 'label' else 'Type a sound or description...')
-        text(shown, 432, 407, .52, TEXT if query_text else MUTED)
-        text('ENTER saves your label / ESC cancels / does not train recognition' if entry_kind == 'label'
-             else 'ENTER search / ESC cancel / searches recorded events', 432, 433, .32, MUTED)
+        text(shown, 432, 378, .52, TEXT if query_text else MUTED)
+        text('Your label describes this event; it does not train recognition.' if entry_kind == 'label'
+             else 'Searches sounds already recorded in this history.', 432, 398, .32, MUTED)
+        _button(out, layout['editor_submit'], 'submit', 'Save label' if entry_kind == 'label' else 'Search',
+                s, accent=CYAN)
+        _button(out, layout['editor_cancel'], 'cancel', 'Cancel', s)
+        _button(out, layout['editor_delete'], 'delete', 'Delete', s)
     cv2.line(out, pt(24, 685), pt(1256, 685), LINE, 1)
-    text(('ENTER save    ESC cancel    BACKSPACE delete' if entry_kind == 'label' else
-          'ENTER search    ESC cancel    BACKSPACE delete') if search_text is not None else
+    text(('Save label to apply it / Cancel to return' if entry_kind == 'label' else
+          'Search recorded sounds / Cancel to return') if search_text is not None else
          'UP / DOWN select    B live    E replay    A analyze    N name    T search', 24, 707, .33, MUTED)
     text('LOCAL EVENT EVIDENCE', 1088, 707, .28, MUTED)
     return out
