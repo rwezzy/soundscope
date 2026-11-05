@@ -205,7 +205,7 @@ class Worker(unittest.TestCase):
         self.assertEqual(alerts(), ['knock on the door'])
         self.clock.t += 30
         self.meta.classify_sound.return_value = {'label': 'doorbell chime', 'category': 'beep or tone',
-                                                 'description': 'two tones', 'confidence': 0.7, 'watch': []}
+                                                 'description': 'two tones', 'confidence': 0.8, 'watch': []}
         e.process(self.task(tone(), snr=18.8))           # named in the label, not listed: still an alert
         self.assertEqual(alerts(), ['knock on the door', 'doorbell'])
         self.clock.t += 30
@@ -236,10 +236,10 @@ class Worker(unittest.TestCase):
         e = self.enricher(features=('identify',))
         e.watch = ['phone ringing']
         self.meta.classify_sound.return_value = {'label': 'phone ringing', 'category': 'alarm or ringtone',
-                                                 'description': 'beeps', 'confidence': 0.4, 'watch': []}
-        e.process(self.task(tone(), snr=12.0))            # 0.4 sure at +12 dB: no alert
+                                                 'description': 'beeps', 'confidence': 0.7, 'watch': []}
+        e.process(self.task(tone(), snr=12.0))            # 0.7 sure at +12 dB: no alert
         self.clock.t += 30
-        e.process(self.task(tone(), snr=33.0))            # 0.4 sure at +33 dB (live ring, Nov 4): alert
+        e.process(self.task(tone(), snr=33.0))            # 0.7 sure at +33 dB: alert
         self.assertEqual([r[2]['watch'] for r in self.results if r[1] == 'alert'], ['phone ringing'])
 
     def test_names_are_listened_for_in_longer_sounds(self):

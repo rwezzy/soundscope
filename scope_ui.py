@@ -322,7 +322,7 @@ def _alert_banner(image, text):
 def _captions(image, captions, scale):
     """Caption bubbles near the pixel each sound came from (bottom center when off screen)."""
     h, w = image.shape[:2]
-    stack = {}
+    placed = []  # boxes already drawn: a new caption moves up (or down) until it covers none
     for cap in captions or ():
         text = _clean(cap.get('text', ''))[:140]
         if not text:
@@ -338,10 +338,15 @@ def _captions(image, captions, scale):
             x, y = u - box_w // 2, v - box_h - int(30 * scale)
         else:
             x, y = (w - box_w) // 2, h - box_h - 12
-        key = (x // 40, y // 40)
-        y -= stack.get(key, 0)
-        stack[key] = stack.get(key, 0) + box_h + 6
         x, y = int(np.clip(x, 4, max(4, w - box_w - 4))), int(np.clip(y, 4, max(4, h - box_h - 4)))
+        for _ in range(12):
+            hit = next((b for b in placed if x < b[0] + b[2] + 6 and b[0] < x + box_w + 6
+                        and y < b[1] + b[3] + 6 and b[1] < y + box_h + 6), None)
+            if hit is None:
+                break
+            y = hit[1] - box_h - 6 if hit[1] - box_h - 6 >= 4 else hit[1] + hit[3] + 6
+            y = int(np.clip(y, 4, max(4, h - box_h - 4)))
+        placed.append((x, y, box_w, box_h))
         overlay = image.copy()
         _round_rect(overlay, (x, y, box_w, box_h), PANEL, 8)
         cv2.addWeighted(overlay, 0.82, image, 0.18, 0, dst=image)

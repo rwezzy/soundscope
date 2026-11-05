@@ -33,10 +33,12 @@ ASSIST_WATCH = ('smoke alarm', 'doorbell', 'knock on the door', 'phone ringing',
 # Alerts must be worth interrupting someone for. Live test, Nov 4: every false alert (typing, a clap
 # read as a knock, a hum read as a phone) was under +4 dB over the room; the real ring and knock were
 # +14 and +19 dB. So: clearly audible, a reasonably sure label, and the same alert at most every 20 s.
-ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.6, 20.0
+# Live, Nov 4 evening: loud claps, snaps and whistles (+20 to +30 dB) came back as "knock" or "smoke alarm"
+# at 0.4-0.6 and raised false alerts, so an alert now needs a label at least 75% sure (65% when very loud).
+ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.75, 20.0
 # A very clear sound (20 dB or more over the room) alerts with a less sure label: missing an alarm is worse
 # than a false alarm. Live, Nov 4: a +33 dB ring was labeled "phone ringing" at only 0.4.
-ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.4
+ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.65
 META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no Meta label
 PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
                     re.IGNORECASE)
