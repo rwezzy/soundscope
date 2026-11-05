@@ -42,7 +42,7 @@ Press **Q** to close and finish saving cleanly.
 3. Put a visible phone or Bluetooth speaker to one side. Leave several ordinary objects stationary
    in view. Keep this first demonstration free of overlapping sounds and hidden-source claims.
 4. Press **F** for fullscreen. Pick a readable palette with **M**, a style with **X**, and opacity
-   with **[ / ]** or the on-screen buttons. The original smooth map is the default; contours leave more of the image
+   with **[ / ]** or the on-screen buttons. Classic outline + gradient is the default; contours leave more of the image
    visible. These settings do not improve measured accuracy. Ensure the source, overlay, event
    labels and text are visible in the recording. Use the phone wide shot to show the physical rig.
 5. Rehearse one genuine ringtone event and inspect it with **B**. Confirm the saved scene and audio

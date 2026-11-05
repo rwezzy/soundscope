@@ -12,7 +12,7 @@ $take = Get-Date -Format 'yyyyMMdd_HHmmss'
 $env:SOUNDSCOPE_MEMORY = Join-Path $PSScriptRoot "recordings\takes\$take\memory"
 $env:META_SESSION_LIMIT_USD = '0'
 $env:META_DAILY_LIMIT_USD = '0'
-$launchArgs = @('-B', 'scope.py', '--mount', 'carrier_v3', '--palette', 'amber', '--heatmap-style', 'smooth', '--heatmap-opacity', '0.44')
+$launchArgs = @('-B', 'scope.py', '--mount', 'carrier_v3', '--palette', 'amber', '--heatmap-style', 'classic', '--heatmap-opacity', '0.44')
 if ($UseMeta) {
     $env:META_SESSION_LIMIT_USD = '0.10'
     $env:META_DAILY_LIMIT_USD = '1.00'
@@ -29,7 +29,8 @@ if ($Record) {
     Write-Host "Silent screen video: $outputVideo"
 }
 Write-Host 'Standalone only. No arm connection.'
-Write-Host 'M: colours. X: map style. [ / ]: opacity. B: history. E: replay. N: name event. T: search. ?: help. Q: finish.'
+Write-Host 'Use the on-screen icon buttons for Voice, Analyze, Search, History, Calibrate, Heatmap and Finish.'
+Write-Host 'Keyboard alternatives are in Help. Use -UseMeta to enable automatic transcripts and sound labels.'
 Write-Host "This take's sound history: $env:SOUNDSCOPE_MEMORY"
 $python = (Get-Command python -ErrorAction Stop).Source
 & $python @launchArgs

@@ -13,6 +13,7 @@ import numpy as np
 
 
 HEATMAP_STYLES = {
+    'classic': 'Outline + gradient',
     'smooth': 'Smooth gradient',
     'bands': 'Score bands',
     'contours': 'Score contours',
@@ -90,9 +91,47 @@ def _blend_tables(style, palette, opacity, weak):
             np.rint(contribution).astype(np.uint8).reshape(256, 1, 3))
 
 
-def blend_heatmap(image_bgr, strength, *, style='smooth', palette='amber', opacity=0.44, weak=False):
+def _classic_outline(image, field, valid, support_mask, color, opacity):
+    """One thin boundary of supplied acoustic support, preserving every region.
+
+    The fallback is the viewer's existing relative-score threshold, never a
+    decorative circle or an object contour. Half-pixel simplification is only
+    anti-aliasing cleanup; no region is shrunk, merged or selected as the winner.
+    """
+    if support_mask is None:
+        support = field >= .8
+    else:
+        support = np.asarray(support_mask)
+        if support.shape != field.shape:
+            raise ValueError('Classic support mask must match the heatmap shape.')
+        support = np.isfinite(support) & (support != 0)
+    support = (support & valid & (field > 0)).astype(np.uint8)
+    if not np.any(support):
+        return
+    contours, _ = cv2.findContours(support, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [cv2.approxPolyDP(contour, .5, True) for contour in contours]
+    coverage = np.zeros(field.shape, np.uint8)
+    cv2.drawContours(coverage, contours, -1, 255,
+                     max(1, round(min(field.shape) / 720)), cv2.LINE_AA)
+    # Keep narrow gaps and invalid depth cells empty, including anti-aliasing.
+    cv2.multiply(coverage, support, dst=coverage)
+    alpha = np.arange(256, dtype=np.float32) / 255 * min(.85, .7 * opacity / .44)
+    retention = np.rint((1 - alpha) * 255).astype(np.uint8)
+    contribution = np.rint(alpha[:, None] * np.asarray(color)).astype(np.uint8).reshape(256, 1, 3)
+    cv2.multiply(image, cv2.cvtColor(cv2.LUT(coverage, retention), cv2.COLOR_GRAY2BGR),
+                 scale=1 / 255.0, dst=image)
+    cv2.add(image, cv2.applyColorMap(coverage, contribution), dst=image)
+
+
+def blend_heatmap(image_bgr, strength, *, style='classic', palette='amber', opacity=0.44,
+                  weak=False, support_mask=None, outline=True, outline_color=None):
     """Blend into and return ``image_bgr`` without changing ``strength``.
 
+    Classic adds one thin actual-support boundary to the smooth gradient.
+    ``support_mask`` is the already-computed acoustic region; if absent, the
+    existing relative-score >= .8 display threshold is used. ``outline=False``
+    allows off-screen evidence to keep its gradient without a false in-frame
+    boundary. Weak evidence never gets a boundary.
     Smooth/bands tint measured relative scores (bands leave <0.2 transparent);
     contours trace their 0.2/0.4/
     0.6/0.8 level sets. Spotlight preserves the scene at high scores and dims
@@ -162,4 +201,7 @@ def blend_heatmap(image_bgr, strength, *, style='smooth', palette='amber', opaci
     cv2.add(image_bgr, contribution, dst=image_bgr)
     if invalid_scene is not None:
         image_bgr[~valid] = invalid_scene
+    if style == 'classic' and not weak and outline:
+        color = palette_lut(palette)[255, 0] if outline_color is None else outline_color
+        _classic_outline(image_bgr, field, valid, support_mask, color, opacity)
     return image_bgr

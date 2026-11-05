@@ -49,7 +49,7 @@ from event_evidence import EvidenceStore, EvidenceWriter
 import history_ui
 from history_controller import HistoryController
 from insight import ASSIST_WATCH, FEATURES, Enricher
-from meta_api import COMMAND_WORDS, ENV_FILE, Meta, MetaError, load_env
+from meta_api import COMMAND_WORDS, ENV_FILE, Meta, MetaError, BudgetError, load_env
 
 WINDOW = 'SoundScope'
 GRID_STEP = 8        # score every 8th pixel
@@ -300,17 +300,24 @@ def handle_voice(meta, wav, ui, hunt, ask=None):
         say(ui, "Didn't hear a command. Press V, then speak.")
         return
     try:
+        ui['meta_command'] = {'phase': 'processing', 'text': 'Muse Voice: transcribing your command', 'at': time.monotonic()}
         try:
             text = meta.transcribe(wav, keywords=COMMAND_WORDS).strip()
         except TypeError:  # stand-ins without keyword support
             text = meta.transcribe(wav).strip()
         if not text:
+            ui['meta_command'] = {'phase': 'idle', 'text': 'No clear command transcript returned', 'at': time.monotonic()}
             say(ui, "Didn't catch that. Press V and try again.")
             return
+        ui['latest_transcript'] = {'text': 'You: ' + text, 'time': time.strftime('%H:%M:%S')}
+        ui['meta_command'] = {'phase': 'processing', 'text': 'Muse Spark: understanding your command', 'at': time.monotonic()}
         cmd = meta.parse_command(text)
     except MetaError as exc:
+        ui['meta_command'] = {'phase': 'budget' if isinstance(exc, BudgetError) else 'error',
+                              'text': str(exc), 'at': time.monotonic()}
         say(ui, f'Voice command failed: {exc}')
         return
+    ui['meta_command'] = {'phase': 'idle', 'text': 'Voice command understood', 'at': time.monotonic()}
     sound = (cmd.get('sound') or '').strip() or None
     action = cmd.get('action')
     if action in ('find', 'follow'):
@@ -327,9 +334,13 @@ def handle_voice(meta, wav, ui, hunt, ask=None):
             what = 'no sound memory in this session'
         else:
             say(ui, f'You asked "{text}". Looking it up...')
+            ui['meta_command'] = {'phase': 'processing', 'text': 'Looking up your recorded sounds', 'at': time.monotonic()}
             try:
                 say(ui, ask(cmd, text))
+                ui['meta_command'] = {'phase': 'idle', 'text': 'Recorded-sound answer ready', 'at': time.monotonic()}
             except Exception as exc:
+                ui['meta_command'] = {'phase': 'budget' if isinstance(exc, BudgetError) else 'error',
+                                      'text': str(exc), 'at': time.monotonic()}
                 say(ui, f'Could not answer: {exc}')
             return
     else:
@@ -767,6 +778,43 @@ class Session:
             text += '  |  ' + self.meta.budget.short()
         return text
 
+    def ai_status(self):
+        """Visible feature and request state; never infer activity from a saved key."""
+        labels = {'identify': 'Sound labels', 'captions': 'Transcripts',
+                  'context': 'Scene context', 'outline': 'SAM outlines'}
+        features = [labels[f] for f in FEATURES if f in self.features]
+        enabled = bool(features)
+        status = {'phase': 'idle' if enabled else 'off',
+                  'text': 'Waiting for usable audio' if enabled else 'Automatic Meta analysis is off',
+                  'detail': ' / '.join(features) if enabled else 'No automatic transcripts or sound labels',
+                  'features': features}
+        worker = self.enricher
+        if worker is not None and enabled:
+            activity = worker.activity_status()
+            active = activity.get('active') or []
+            last = activity.get('last') or {}
+            if activity.get('budget_paused'):
+                status.update(phase='budget', text='Meta budget paused; local listening continues')
+            elif active:
+                status.update(phase='processing', text=' / '.join(active))
+            elif activity.get('queued'):
+                status.update(phase='processing', text=f"{activity['queued']} sound(s) queued for analysis")
+            elif last.get('message'):
+                status.update(phase='error' if last.get('state') == 'error' else 'idle', text=last['message'])
+        command = self.ui.get('meta_command') or {}
+        if command and (command.get('phase') == 'processing' or
+                        time.monotonic() - command.get('at', 0) < 10):
+            status.update(phase=command['phase'], text=command['text'])
+        if self.meta is not None:
+            # Budget.short caches disk access; avoid reading the ledger each frame.
+            status['budget'] = self.meta.budget.short()
+            if self.meta.budget.session == 0 or self.meta.budget.daily == 0:
+                status.update(phase='budget', text='Meta paused: this run has a $0 limit')
+        transcript = self.ui.get('latest_transcript')
+        if transcript:
+            status['transcript'] = f"{transcript['time']}  {transcript['text']}"
+        return status
+
     def remember_frame(self, now, frame):
         """Keep a small copy every ~0.2 s, so a sound's spot can also be seen from just before it."""
         if self.enricher is None or 'context' not in self.features:
@@ -928,6 +976,8 @@ class Session:
             elif kind == 'captions':
                 for turn in payload:
                     text = f"{turn['name']} ({turn['where']}): {turn['text']}"
+                    self.ui['latest_transcript'] = {
+                        'text': text, 'time': str((rec or {}).get('time') or '')[11:19] or time.strftime('%H:%M:%S')}
                     self.show(text, pixel, now + CAPTION_S, 'speech')
                     print('  ' + text, flush=True)
                     called = sound_memory.name_called(turn['text'], self.names)
@@ -1057,7 +1107,7 @@ def run(args, cfg):
     heatmap, diagnostics, paused = not args.no_heatmap, args.diagnostics, False
     heatmap_palette = getattr(args, 'palette', 'amber')
     heatmap_opacity = getattr(args, 'heatmap_opacity', 0.44)
-    heatmap_style = getattr(args, 'heatmap_style', 'smooth')
+    heatmap_style = getattr(args, 'heatmap_style', 'classic')
     show_help, display_action = False, None
     pause_time, held = None, None
     viewport = initial_viewport()
@@ -1103,22 +1153,32 @@ def run(args, cfg):
 
     def ask_history(question):
         try:
+            ui['meta_command'] = {'phase': 'processing', 'text': 'Searching recorded sound evidence', 'at': time.monotonic()}
             # Explicit user query: use the existing Meta session if enabled; otherwise free local search.
             answer = session.ask({'action': 'search', 'question': question}, question)
             say(ui, answer)
             ui['search_answer'] = (answer, time.monotonic() + 20)
+            ui['meta_command'] = {'phase': 'idle', 'text': 'Recorded-sound answer ready', 'at': time.monotonic()}
         except Exception as exc:
+            ui['meta_command'] = {'phase': 'budget' if isinstance(exc, BudgetError) else 'error',
+                                  'text': str(exc), 'at': time.monotonic()}
             say(ui, f'History search unavailable: {exc}')
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click, history_action, display_action
-        if history.active and search_text is None and event == cv2.EVENT_LBUTTONDOWN:
-            history_action = history.handle_click(x, y, displayed_viewport or viewport)
+        if history.active and event == cv2.EVENT_LBUTTONDOWN:
+            if search_text is None:
+                history_action = history.handle_click(x, y, displayed_viewport or viewport)
+            else:
+                history_action = history_ui.hit_test(x, y, displayed_viewport or viewport,
+                                                     len(history.events), history.selected,
+                                                     search_text=search_text)
             return
-        if event == cv2.EVENT_LBUTTONDOWN and search_text is None and shape is not None:
+        if event == cv2.EVENT_LBUTTONDOWN and shape is not None:
             display_action = scope_ui.control_hit_test(
                 x, y, shape, displayed_viewport or viewport,
-                recent_events=displayed_recent_events)
+                recent_events=displayed_recent_events, search_text=search_text,
+                calibration_active=cal.active, show_help=show_help)
             if display_action is not None or show_help:
                 return
         if cal.active and not paused and shape is not None and event == cv2.EVENT_LBUTTONDOWN:
@@ -1277,6 +1337,8 @@ def run(args, cfg):
             if history_action is not None:
                 if history_action[0] == 'play':
                     play_history()
+                elif history_action[0] in ('analyze', 'name', 'search', 'submit', 'cancel', 'delete'):
+                    display_action = history_action[0]
                 history_action = None
             shown_view = hunt['found'] or view
             if session.outline is not None and shown_view is not None and \
@@ -1294,6 +1356,7 @@ def run(args, cfg):
                        search_answer=(ui['search_answer'][0] if ui.get('search_answer') and
                                       now < ui['search_answer'][1] else None),
                        viewport_size=viewport, captions=session.captions,
+                       ai_status=session.ai_status(),
                        recent_events=recent_events,
                        outlines=[poly for polys, _ in session.outlines for poly in polys],
                        alert=session.alert[0] if session.alert else None)
@@ -1333,7 +1396,11 @@ def run(args, cfg):
                     key = {'style': ord('x'), 'palette': ord('m'),
                            'opacity_down': ord('['), 'opacity_up': ord(']'),
                            'history': ord('b'), 'search': ord('t'),
-                           'help': ord('?')}.get(display_action, key)
+                           'help': ord('?'), 'voice': ord('v'), 'analyze': ord('a'),
+                           'name': ord('n'), 'quit': ord('q'),
+                           'calibrate': ord('c'), 'heatmap': ord('h'), 'pause': ord(' '),
+                           'fullscreen': ord('f'), 'snapshot': ord('s'),
+                           'submit': 13, 'cancel': 27, 'delete': 8}.get(display_action, key)
                 display_action = None
             if search_text is None and history.active and raw_key in (2490368, 2621440, 65362, 65364):
                 history.next(-1 if raw_key in (2490368, 65362) else 1)
@@ -1396,14 +1463,20 @@ def run(args, cfg):
                 history.next(-1 if key == ord('k') else 1)
             elif history.active and key == ord('e'):
                 play_history()
-            elif history.active and key == ord('a'):
+            elif key == ord('a'):
+                if not history.active:
+                    open_history()
                 current = history.current()
                 if current:
                     history.status = session.analyze_saved(current)
+                else:
+                    history.status = 'Make a sound first; there is no saved audio to analyze yet.'
             elif key == ord('v'):
                 try:
                     session.get_meta()
                     requests.put_nowait(4.0)
+                    ui['meta_command'] = {'phase': 'idle', 'text': 'Recording your voice command (4 seconds)',
+                                          'at': time.monotonic()}
                     say(ui, 'Listening for your command (4 s), e.g. "find my keys" or "when did the phone ring?"')
                 except MetaError as exc:
                     say(ui, f'Voice needs MODEL_API_KEY in meta-soundscope/.env: {exc}')
@@ -1521,7 +1594,7 @@ def main():
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
     p.add_argument('--palette', choices=tuple(scope_ui.HEATMAP_PALETTES), default='amber',
                    help='heatmap colours (M cycles while running)')
-    p.add_argument('--heatmap-style', choices=tuple(scope_ui.HEATMAP_STYLES), default='smooth',
+    p.add_argument('--heatmap-style', choices=tuple(scope_ui.HEATMAP_STYLES), default='classic',
                    help='heatmap presentation (X cycles while running)')
     p.add_argument('--heatmap-opacity', type=float, default=0.44, help='heatmap strength, 0 to 0.85')
     p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
