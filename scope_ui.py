@@ -652,7 +652,7 @@ def _captions(image, captions, scale):
         pixel = cap.get('pixel')
         if pixel is not None:
             u, v = int(pixel[0]), int(pixel[1])
-            x, y = u - box_w // 2, v - box_h - int(30 * scale)
+            x, y = u - box_w // 2, v + int(26 * scale)
         else:
             x, y = (w - box_w) // 2, h - box_h - 12
         x, y = int(np.clip(x, 4, max(4, w - box_w - 4))), int(np.clip(y, 4, max(4, h - box_h - 4)))

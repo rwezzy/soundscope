@@ -123,6 +123,40 @@ class Answers(unittest.TestCase):
         self.assertEqual(self.session.memory.get(rec['id'])['speech']['speaker'], 'Keith')
 
 
+class Claps(unittest.TestCase):
+    # Profiles measured on the real board, Nov 4.
+    CLAPS = [dict(duration_s=0.14, attack_ms=20, crest_db=21.6, flatness=0.116, centroid_hz=1760, onsets=2,
+                  tone_share=0.193, speech_score=0.0, snr=30.1),
+             dict(duration_s=0.08, attack_ms=30, crest_db=21.8, flatness=0.097, centroid_hz=1366, onsets=2,
+                  tone_share=0.073, speech_score=0.0, snr=14.7)]
+    OTHERS = [dict(duration_s=0.33, crest_db=14.2, centroid_hz=677, onsets=1, tone_share=0.424, speech_score=0.0,
+                   snr=24.2),                                                   # knock (low)
+              dict(duration_s=0.21, crest_db=8.9, centroid_hz=1265, onsets=1, tone_share=0.927, speech_score=0.0,
+                   snr=26.2),                                                   # electronic beep (tonal)
+              dict(duration_s=0.27, crest_db=12.1, centroid_hz=335, onsets=1, tone_share=0.476, speech_score=0.0,
+                   snr=1.6),                                                    # room thump (faint, low)
+              dict(duration_s=0.72, crest_db=14.7, centroid_hz=878, onsets=1, tone_share=0.213, speech_score=0.79,
+                   snr=13.1)]                                                   # speech
+
+    def test_real_claps_are_claps_and_other_sounds_are_not(self):
+        for c in self.CLAPS:
+            self.assertTrue(sm.looks_like_clap(c, c['snr']), c)
+        for o in self.OTHERS:
+            self.assertFalse(sm.looks_like_clap(o, o['snr']), o)
+
+    def test_a_clap_is_labeled_instantly_and_never_sent_to_a_model(self):
+        results = []
+        enricher = Enricher(sm.Memory(tempfile.mkdtemp()), mock.Mock(), {'identify', 'context'},
+                            on_result=lambda *r: results.append(r))
+        enricher.watch = ['knock on the door']
+        rec = record(30.0)
+        rec['sound'].update(label='clap', source='local', confidence=0.85)
+        enricher.process({'record': rec, 'wav': wav_bytes(ring(0.1)), 'requested_at': time.time()})
+        enricher.meta.classify_sound.assert_not_called()
+        enricher.meta.source_check.assert_not_called()
+        self.assertEqual(results, [])
+
+
 class Screen(unittest.TestCase):
     def test_possible_card_buttons_are_clickable_where_they_are_drawn(self):
         frame = np.full((720, 1280, 3), 80, np.uint8)

@@ -875,6 +875,10 @@ class Session:
                                            mode=self.mode, now=started)
             if report.get('audio_capture'):
                 rec['audio_capture'] = report['audio_capture']
+            clap = sound_memory.looks_like_clap(rec.get('acoustic'), (rec.get('loudness') or {}).get('snr_db'))
+            if clap:  # free and instant: a clap needs no model (models called claps "knocks")
+                rec['sound'].update(label='clap', category='clap or knock', confidence=0.85, source='local',
+                                    description='sharp, bright, short burst: a hand clap or snap')
             if self.memory is not None:
                 self.memory.add(rec)
                 if wav:
@@ -897,6 +901,8 @@ class Session:
                         self.memory.update(rec['id'], {'evidence_error': str(exc)})
             self.event_records[report.get('event_id')] = rec['id']
             print(sound_memory.phrase(rec), flush=True)
+            if clap:  # on screen right away, under the spot (the hands), not over a face
+                self.show('clap', rec['where'].get('pixel'), time.monotonic() + 3.0, 'label')
             if self.enricher is not None:
                 task = {'record': rec, 'wav': wav, 'speech_wav': report.get('speech_wav'),
                         'track': self.tracks.pop(report.get('event_id'), []),

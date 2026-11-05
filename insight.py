@@ -435,6 +435,9 @@ class Enricher(threading.Thread):
                 self._update(rid, {'sound': {'local_label': label, 'local_similarity': similarity}}, 'label')
                 if similarity >= 0.9:
                     self._alerts(rid, record, [w for w in watch if _same_sound(w, label)], 'your example')
+        sound = record.get('sound') or {}
+        if not explicit and sound.get('source') == 'local' and sound.get('label') == 'clap':
+            return  # a clap was recognized for free; a model would only risk calling it a knock
         if stale:
             self._activity_note('skipped', 'analysis', 'Analysis skipped: request is stale or its time is invalid.')
             if explicit:

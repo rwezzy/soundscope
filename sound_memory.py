@@ -395,6 +395,29 @@ def _annotation_label(record):
         return ''
 
 
+# A clap, measured on the real board (6 claps by a person, Nov 4): +15 to +32 dB over the room,
+# 0.07-0.16 s, 21-25 dB crest, centroid 1.4-1.8 kHz, not tonal, not speech. A table or door knock and the
+# room's thumps were 300-700 Hz; beeps are tonal. Thresholds sit outside both groups with margin.
+CLAP_MIN_SNR_DB, CLAP_MAX_S, CLAP_MIN_CREST_DB, CLAP_MIN_CENTROID_HZ = 6.0, 0.35, 16.0, 1000.0
+CLAP_MAX_TONE_SHARE, CLAP_MAX_ONSETS = 0.35, 3
+
+
+def looks_like_clap(acoustic, snr_db):
+    """True for a clear hand clap (or a finger snap: same physics), from free measurements only."""
+    a = acoustic or {}
+    try:
+        snr = float(snr_db)
+        return (snr >= CLAP_MIN_SNR_DB
+                and 0 < float(a.get('duration_s') or 0) <= CLAP_MAX_S
+                and float(a.get('crest_db') or 0) >= CLAP_MIN_CREST_DB
+                and float(a.get('centroid_hz') or 0) >= CLAP_MIN_CENTROID_HZ
+                and float(a.get('tone_share') if a.get('tone_share') is not None else 1) <= CLAP_MAX_TONE_SHARE
+                and int(a.get('onsets') or 0) <= CLAP_MAX_ONSETS
+                and float(a.get('speech_score') or 0) < 0.5)
+    except (TypeError, ValueError):
+        return False
+
+
 def annotate_event(memory, rid, label):
     """Name one saved event locally, without changing evidence or teaching a recognizer.
 
