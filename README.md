@@ -21,7 +21,9 @@ python scope.py --mount carrier_v3 --assist
 | **Live sound map** | Acoustic agreement over the camera view, with weak/ambiguous/candidate states |
 | **Evidence history** | Saved event metadata and, when available, the captured WAV and scene JPEG; explicit audio replay |
 | **Semantic search** | Questions such as “When did the phone ring?” retrieve stored events; answers render their recorded facts |
-| **Captions and watch alerts** | Speech transcription, approximate direction, and likely watched-sound matches |
+| **Captions and watch alerts** | Speech as subtitles along the bottom of the picture (never over a face), each talker in their own color with an arrow toward their side and a marker on the picture's edge below them; watched sounds raise an alert only when the label is sure |
+| **Possible sounds you confirm** | An unsure match ("Possible knock on the door?") is a calm card with Yes / No / Inspect, not a red alert. Your answer becomes an example: yes, similar sounds are recognized for free; no, similar sounds are never flagged as that again |
+| **Names that teach** | Name a saved sound (N) and it becomes one of your examples; "Speaker 1 is Keith" renames a talker in past and future captions |
 | **Nearby context and outlines** | Models describe or outline the visible candidate selected by acoustic evidence |
 | **Voice commands** | Spoken search and watch commands, through transcription and intent parsing |
 
@@ -80,6 +82,8 @@ For isolated recording takes with an explicit spending limit, see [the standalon
 
 | Key | Action |
 |---|---|
+| **Y** / **U** / **I** | Answer a "Possible ...?" card: yes / no (both teach it) / inspect it in history |
+| **N** | Name the selected saved sound (it becomes an example) or a talker: "Speaker 1 is Keith" |
 | **F** | Fullscreen |
 | **M** / **H** | Change heatmap palette / show or hide it |
 | **T**, then **Enter** | Type and submit a history question; Esc cancels |
@@ -94,6 +98,17 @@ For isolated recording takes with an explicit spending limit, see [the standalon
 The history view shows a **saved scene**, not a live camera fix. Its timestamp, scene/audio timing
 information and availability matter. A scene JPEG is one captured frame, not an event video clip.
 A replay may be normalized: playback volume does not reproduce the original sound pressure.
+
+### This build
+
+This branch starts from the parallel version (Meta_Hack/soundscope_v2: the black dashboard, classic
+outline-plus-gradient heat map, evidence history with audio replay, clear single-mic event audio,
+ringtone-vs-speech routing, budget reservations, camera start-up retry, mic routing check) and adds:
+the action buttons in a toolbar under the header (they were hard to see along the bottom), speech as
+subtitles, "Possible ...?" cards with Yes / No / Inspect that teach your examples, naming that
+teaches, and talker renaming. The automatic analysis floor is -80 dBFS: this board's raw mics record
+quietly (whistle -60, hum -66, snaps and claps -65 to -78 dBFS at 1 m), and the parallel version's
+-50 dBFS floor blocked nearly every real sound, speech included, from labels and captions.
 
 ## What Meta contributes
 
