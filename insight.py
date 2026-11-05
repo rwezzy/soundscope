@@ -44,6 +44,10 @@ ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.75, 20.0
 # A very clear sound (20 dB or more over the room) alerts with a less sure label: missing an alarm is worse
 # than a false alarm. Live, Nov 4: a +33 dB ring was labeled "phone ringing" at only 0.4.
 ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.65
+# Not sure enough to interrupt, but worth a look: a calm "Possible ..." prompt the user confirms or
+# rejects (Nov 5: false knock alerts in big red letters). Their answers become examples.
+POSSIBLE_MIN_SNR_DB, POSSIBLE_MIN_CONFIDENCE = 3.0, 0.35
+REJECT_SIMILARITY = 0.85  # this close to a sound you said "no" to: never flagged as that again
 META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no Meta label
 # A spend-control heuristic for this recording gain, NOT calibrated dB SPL.
 # Quiet recordings remain available locally; explicit analysis can override this
@@ -155,6 +159,7 @@ class Enricher(threading.Thread):
         self.watch = []          # sounds to alert on; replaced (not mutated) by the viewer
         self.max_age_s = 45.0    # older sounds get no Meta request
         self.alerted = {}        # watched sound -> when it last raised an alert
+        self.possibles = {}      # watched sound -> when it was last offered as "possible"
         self._activity_lock = threading.Lock()
         self._activity_active = {}
         self._activity_counts = {key: 0 for key in ('started', 'completed', 'empty', 'errors', 'blocked', 'skipped')}
@@ -332,26 +337,35 @@ class Enricher(threading.Thread):
             on_block(reason)
         return False
 
-    def _alerts(self, rid, record, items, how, confidence=None, label=None):
-        """Raise alerts for watched sounds, only when they are clearly audible and reasonably sure.
-        label: what the model called the sound; a label naming a watched sound counts even when the
-        model did not list it as a watch hit ("doorbell chime" -> doorbell)."""
-        snr = (record.get('loudness') or {}).get('snr_db') or 0.0
-        if snr < (ALERT_MIN_SNR_DB if how == 'Muse Spark' else ALERT_MIN_SNR_DB / 2):
-            return
-        needed = ALERT_LOUD_CONFIDENCE if snr >= ALERT_LOUD_SNR_DB else ALERT_MIN_CONFIDENCE
-        if confidence is not None and confidence < needed:
-            return
+    def _alerts(self, rid, record, items, how, confidence=None, label=None, nearest=None):
+        """Alerts for watched sounds: 'alert' when clearly audible and sure, else 'possible' (a calm
+        prompt to confirm) when audible and plausible. label: what the model called the sound; a label
+        naming a watched sound counts ("doorbell chime" -> doorbell). nearest: (label, similarity) of
+        your closest example; one you rejected ("not knock on the door") silences that watch."""
         items = list(items)
         if label:
             items += [w for w in self.watch if _same_sound(w, label) and w not in items]
+        if nearest and nearest[0] and (nearest[1] or 0) >= REJECT_SIMILARITY:
+            items = [w for w in items if str(nearest[0]).lower() != f'not {w.lower()}']
+        if not items:
+            return
+        snr = (record.get('loudness') or {}).get('snr_db') or 0.0
+        needed = ALERT_LOUD_CONFIDENCE if snr >= ALERT_LOUD_SNR_DB else ALERT_MIN_CONFIDENCE
+        sure = (snr >= (ALERT_MIN_SNR_DB if how == 'Muse Spark' else ALERT_MIN_SNR_DB / 2)
+                and (confidence is None or confidence >= needed))
+        if sure:
+            kind, book = 'alert', self.alerted
+        elif snr >= POSSIBLE_MIN_SNR_DB and (confidence is None or confidence >= POSSIBLE_MIN_CONFIDENCE):
+            kind, book = 'possible', self.possibles
+        else:
+            return
         with self.lock:
             now = self.clock()
-            fresh = [item for item in items if now - self.alerted.get(item.lower(), -1e9) >= ALERT_REPEAT_S]
+            fresh = [item for item in items if now - book.get(item.lower(), -1e9) >= ALERT_REPEAT_S]
             for item in fresh:
-                self.alerted[item.lower()] = now
+                book[item.lower()] = now
         for item in fresh:
-            self.on_result(rid, 'alert', {'watch': item, 'how': how})
+            self.on_result(rid, kind, {'watch': item, 'how': how, 'confidence': confidence})
 
     def _call(self, record_id, fn, *args):
         token, operation = self._activity_begin(fn)
@@ -410,8 +424,12 @@ class Enricher(threading.Thread):
         speechy = speech_likely and record.get('duration_s', 0) >= 0.5  # long enough to caption
 
         watch = list(self.watch)
+        nearest = None
         if wav and self.references is not None and self.references.items:
             label, similarity = self.references.nearest(wav_samples(wav))
+            nearest = (label, similarity)
+            if label is not None and str(label).lower().startswith('not '):
+                label = None  # a sound you said "no" to: it only silences that watch (see _alerts)
             if label is not None and similarity >= 0.8:
                 record.setdefault('sound', {}).update(local_label=label, local_similarity=similarity)
                 self._update(rid, {'sound': {'local_label': label, 'local_similarity': similarity}}, 'label')
@@ -472,7 +490,7 @@ class Enricher(threading.Thread):
                 self.context_cache[self._cell(record)] = (self.clock(), {'near': patch['near']})
                 self._update(rid, patch, 'source')
                 self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['sound_confidence'],
-                             reply['sound'])
+                             reply['sound'], nearest=nearest)
                 person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
                 if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
                     task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
@@ -485,7 +503,7 @@ class Enricher(threading.Thread):
                                              'confidence': round(reply['confidence'], 2), 'source': 'muse-spark'}},
                              'identify')
                 self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
-                             reply['label'])
+                             reply['label'], nearest=nearest)
 
         # Listening for a name: also transcribe longer sounds that did not look like speech (a snap or
         # a door at the start can hide a sentence; live, Nov 4). A caption costs about $0.0003.
@@ -534,7 +552,7 @@ class Enricher(threading.Thread):
                                                'confidence': round(reply['confidence'], 2),
                                                'source': 'muse-spark'}}, 'identify')
                     self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
-                                 reply['label'])
+                                 reply['label'], nearest=nearest)
                     task['_analysis_status'] = 'Saved-event analysis finished: audio-only sound label updated.'
                 elif self.exhausted is not None:
                     manual_notice(f'the estimated budget is paused: {self.exhausted}')

@@ -59,6 +59,7 @@ SNAPSHOTS = Path(__file__).with_name('recordings') / 'snapshots'
 CHECK_S = 8.0        # how long a sound stays on screen while Muse Spark is still judging it
 AFTER_VERDICT_S = 3.0
 CAPTION_S = 6.0
+POSSIBLE_S = 25.0    # how long a "Possible ...?" card waits for your answer
 YAW_FILE = None      # set from the mount profile, so calibration saves where it was loaded from
 
 
@@ -748,6 +749,8 @@ class Session:
         self.frames = collections.deque(maxlen=24)  # (time, small frame, scale): ~5 s for "before" crops
         self.watch = []                     # sounds to alert on ("tell me when ...")
         self.alert = None                   # (text, until) banner
+        self.possible = None                # {'rid', 'watch', 'where', 'when', 'until'}: confirm or reject
+        self.wavs = collections.OrderedDict()  # record id -> WAV of recent sounds, to learn from your answers
         self.meta, self.enricher = None, None
         if self.features:
             self.meta = Meta()
@@ -874,6 +877,10 @@ class Session:
                 rec['audio_capture'] = report['audio_capture']
             if self.memory is not None:
                 self.memory.add(rec)
+                if wav:
+                    self.wavs[rec['id']] = wav
+                    while len(self.wavs) > 60:
+                        self.wavs.popitem(last=False)
                 if self.evidence_writer is not None and wav and frame is not None:
                     try:
                         queued = self.evidence_writer.submit(
@@ -997,6 +1004,13 @@ class Session:
                 text = f"{sound_memory.what_it_was(rec)}: {src.get('object', '?')} ({mark.get(src.get('consistent'), '?')})"
                 self.show(text, pixel, now + 6.0, 'label')
                 print('  ' + sound_memory.phrase(rec), flush=True)
+            elif kind == 'possible':
+                where = (rec or {}).get('where', {}).get('words', '')
+                when = str((rec or {}).get('time') or '')[11:19]
+                self.possible = {'rid': rid, 'watch': payload['watch'], 'where': where, 'when': when,
+                                 'until': now + POSSIBLE_S}
+                notes.append(f"Possible {payload['watch']}" + (f' ({where})' if where else '') +
+                             '? Yes (Y), No (U) or Inspect (I).')
             elif kind == 'alert':
                 where = (rec or {}).get('where', {}).get('words', '')
                 text = f"ALERT: {payload['watch']}" + (f' ({where})' if where else '')
@@ -1013,9 +1027,54 @@ class Session:
         self.outlines = [o for o in self.outlines if o[1] > now]
         if self.alert and self.alert[1] <= now:
             self.alert = None
+        if self.possible and self.possible['until'] <= now:
+            self.possible = None
         if self.outline and self.outline[2] <= now:
             self.outline = None
         return notes
+
+    def sound_wav(self, rid):
+        """The sound's audio: kept in memory for recent sounds, else from its saved evidence."""
+        wav = self.wavs.get(rid)
+        if wav is None and self.memory is not None:
+            rec = self.memory.get(rid) or {}
+            try:
+                _, wav, _ = self.evidence_store.load(rec.get('evidence'))
+            except (ValueError, OSError, TypeError, KeyError):
+                wav = None
+        return wav
+
+    def teach(self, rid, label):
+        """Make this sound one of your examples, so similar sounds get the label for free."""
+        wav = self.sound_wav(rid)
+        if wav is None or self.references is None:
+            return False
+        self.references.add(label, wav)
+        return True
+
+    def answer_possible(self, yes):
+        """Your answer to a "Possible ...?" card becomes an example, so the next similar sound is either
+        recognized for free (yes) or never flagged as that again (no)."""
+        possible, self.possible = self.possible, None
+        if not possible:
+            return 'Nothing to confirm right now.'
+        rid, watch = possible['rid'], possible['watch']
+        rec = self.memory.get(rid) if self.memory is not None else None
+        wav = self.sound_wav(rid)
+        learned = wav is not None and self.references is not None
+        if yes:
+            if rec is not None:
+                sound_memory.relabel(self.memory, rid, watch)
+                self.memory.update(rid, {'alerts': sorted(set((rec.get('alerts') or []) + [watch]))})
+            if learned:
+                self.references.add(watch, wav)
+            return f'Thanks: that was {watch}.' + (f' Similar sounds will be recognized as {watch}.' if learned else '')
+        if rec is not None:
+            rejected = sorted(set(((rec.get('sound') or {}).get('not') or []) + [watch]))
+            self.memory.update(rid, {'sound': {'not': rejected}})
+        if learned:
+            self.references.add(f'not {watch}', wav)
+        return f'Got it: not {watch}.' + (f' Similar sounds will not be flagged as {watch} again.' if learned else '')
 
     def raise_alert(self, rid, rec, text, tag, pixel, now):
         """Banner + caption at the sound + beep, and the alert saved on the sound's record."""
@@ -1180,7 +1239,8 @@ def run(args, cfg):
             display_action = scope_ui.control_hit_test(
                 x, y, shape, displayed_viewport or viewport,
                 recent_events=displayed_recent_events, search_text=search_text,
-                calibration_active=cal.active, show_help=show_help)
+                calibration_active=cal.active, show_help=show_help,
+                possible=bool(session.possible) and not history.active)
             if display_action is not None or show_help:
                 return
         if cal.active and not paused and shape is not None and event == cv2.EVENT_LBUTTONDOWN:
@@ -1361,7 +1421,8 @@ def run(args, cfg):
                        ai_status=session.ai_status(),
                        recent_events=recent_events,
                        outlines=[poly for polys, _ in session.outlines for poly in polys],
-                       alert=session.alert[0] if session.alert else None)
+                       alert=session.alert[0] if session.alert else None,
+                       possible=session.possible)
             if history.active:
                 if ui.get('analysis_status') and history.events:
                     rid, message = ui.pop('analysis_status')
@@ -1402,7 +1463,9 @@ def run(args, cfg):
                            'name': ord('n'), 'quit': ord('q'),
                            'calibrate': ord('c'), 'heatmap': ord('h'), 'pause': ord(' '),
                            'fullscreen': ord('f'), 'snapshot': ord('s'),
-                           'submit': 13, 'cancel': 27, 'delete': 8}.get(display_action, key)
+                           'submit': 13, 'cancel': 27, 'delete': 8,
+                           'possible_yes': ord('y'), 'possible_no': ord('u'),
+                           'possible_inspect': ord('i')}.get(display_action, key)
                 display_action = None
             if search_text is None and history.active and raw_key in (2490368, 2621440, 65362, 65364):
                 history.next(-1 if raw_key in (2490368, 65362) else 1)
@@ -1415,8 +1478,17 @@ def run(args, cfg):
                     question, search_text = search_text, None
                     if entry_kind == 'label':
                         try:
-                            sound_memory.annotate_event(session.memory, label_record_id, question)
-                            history.status = f'Your label saved: {question}. Recognition is unchanged.'
+                            kind_, speaker_, name_ = sound_memory.parse_naming(question)
+                            if kind_ == 'speaker':
+                                live = session.speakers.rename(speaker_, name_)
+                                changed = sound_memory.rename_speaker(session.memory, speaker_, name_)
+                                history.status = (f'{live or speaker_} is now "{name_}" '
+                                                  f'({changed} saved caption{"s" if changed != 1 else ""} updated).')
+                            else:
+                                sound_memory.annotate_event(session.memory, label_record_id, name_ or question)
+                                taught = session.teach(label_record_id, name_ or question)
+                                history.status = (f'Your label saved: {name_ or question}.' +
+                                                  (' Similar sounds will be recognized as it.' if taught else ''))
                             say(ui, history.status)
                         except (ValueError, OSError) as exc:
                             say(ui, f'Could not save label: {exc}')
@@ -1431,6 +1503,18 @@ def run(args, cfg):
                 key += ord('a') - ord('A')
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
+            if session.possible and not history.active and key in (ord('y'), ord('u'), ord('i')):
+                if key == ord('i'):  # inspect: open that sound in history (saved scene, audio)
+                    rid = session.possible['rid']
+                    session.possible = None
+                    open_history()
+                    for index, record in enumerate(history.events):
+                        if record.get('id') == rid:
+                            history.selected = index
+                            break
+                else:
+                    say(ui, session.answer_possible(key == ord('y')))
+                continue
             if key == ord('?'):
                 history.active = False
                 show_help = not show_help

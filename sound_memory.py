@@ -888,6 +888,68 @@ class SpeakerMap:
         live = [c for c in self.clusters if now - c[2] <= self.forget]
         return [(c[0], direction_words(c[1]), ago(c[2], now)) for c in sorted(live, key=lambda c: c[1])]
 
+    def rename(self, old, new):
+        """Give a talker a real name ("Speaker 1" -> "Keith"); later captions from there use it.
+        Returns the old name as it was known, or None if nobody by that name is talking."""
+        key = speaker_key(old)
+        for cluster in self.clusters:
+            if speaker_key(cluster[0]) == key:
+                found, cluster[0] = cluster[0], new.strip()
+                return found
+        return None
+
+
+
+SPOKEN_NUMBERS = {'one': '1', 'two': '2', 'three': '3', 'four': '4', 'five': '5', 'six': '6', 'seven': '7',
+                  'eight': '8', 'nine': '9', 'ten': '10', 'won': '1', 'to': '2', 'too': '2', 'for': '4'}
+
+
+def speaker_key(name):
+    """Comparable form of a talker's name: "speaker one", "Speaker 1" and "person 1" all match."""
+    words = re.findall(r"[a-z']+|[0-9]+", (name or '').lower())  # "person1" -> person, 1
+    words = [SPOKEN_NUMBERS.get(w, w) for w in words]
+    if len(words) == 2 and words[0] in ('speaker', 'person', 'talker', 'voice') and words[1].isdigit():
+        return f'speaker {words[1]}'
+    return ' '.join(words)
+
+
+def rename_speaker(memory, old, new):
+    """Rename a talker in every remembered caption (so "did Keith say anything?" finds them).
+    Returns how many records changed."""
+    key, changed = speaker_key(old), 0
+    for rec in memory.recent(100000):
+        speech = rec.get('speech') or {}
+        turns = speech.get('turns') or []
+        hit = speaker_key(speech.get('speaker')) == key or any(speaker_key(t.get('name')) == key for t in turns)
+        if not hit:
+            continue
+        patch = {'speech': {'turns': [{**t, 'name': new} if speaker_key(t.get('name')) == key else t for t in turns]}}
+        if speaker_key(speech.get('speaker')) == key:
+            patch['speech']['speaker'] = new
+        memory.update(rec['id'], patch)
+        changed += 1
+    return changed
+
+
+def relabel(memory, record_id, label):
+    """Your own name for a sound replaces the model's label (and is searchable from then on)."""
+    return memory.update(record_id, {'sound': {'label': label.strip(), 'category': None, 'confidence': 1.0,
+                                               'source': 'you', 'verified': True}})
+
+
+def parse_naming(text):
+    """'Speaker 1 is Keith' / 'call speaker two Mom' -> ('speaker', 'Speaker 1', 'Keith');
+    anything else ('my kettle', 'that was the doorbell') -> ('sound', None, 'kettle' / 'doorbell')."""
+    t = (text or '').strip().rstrip('.!')
+    m = re.match(r"(?i)^(?:call\s+|name\s+|rename\s+)?((?:speaker|person|talker|voice)\s*\w+)\s*(?:=|:|is|as|to|->)?\s+(.+)$", t)
+    if m and re.fullmatch(r'speaker \d+', speaker_key(m.group(1))):
+        return 'speaker', 'Speaker ' + speaker_key(m.group(1)).split()[1], m.group(2).strip()
+    t = re.sub(r"(?i)^(?:that\s+(?:was|is)\s+|it\s+(?:was|is)\s+|this\s+is\s+|call\s+(?:it|that)\s+|label\s+(?:it|that)\s+(?:as\s+)?)", '', t)
+    t = re.sub(r"(?i)^(?:a|an|the)\s+", '', t).strip()
+    return 'sound', None, t
+
+
+
 
 def name_called(text, names):
     """The first of `names` said as a whole word in a caption, or None ("Keith!" yes, "Keithley" no)."""

@@ -115,8 +115,15 @@ def camera_rgb_crop(canvas, frame_shape, viewport_size=None):
     return cv2.cvtColor(canvas[y:y + h, x:x + w], cv2.COLOR_BGR2RGB)
 
 
+def possible_card_rect(layout):
+    """Where the "Possible ...?" card sits (unshifted body coordinates): top-left of the picture."""
+    p = lambda value: int(round(value * layout.scale))
+    x, y, _, _ = layout.camera
+    return x + p(14), y + p(14), p(440), p(104)
+
+
 def control_rects(frame_shape, viewport_size=None, *, search_text=None,
-                  calibration_active=False, show_help=False, shifted=True):
+                  calibration_active=False, show_help=False, shifted=True, possible=False):
     """Named clickable controls; shared by drawing and mouse hit testing."""
     layout = _layout(frame_shape, viewport_size)
     p = lambda value: int(round(value * layout.scale))
@@ -136,6 +143,10 @@ def control_rects(frame_shape, viewport_size=None, *, search_text=None,
         'opacity_down': (sx + sw - p(82), p(624) + d, p(28), p(27)),
         'opacity_up': (sx + sw - p(44), p(624) + d, p(28), p(27)),
     }
+    if possible and search_text is None and not calibration_active:
+        cx, cy, cw, ch = possible_card_rect(layout)
+        for i, name in enumerate(('possible_yes', 'possible_no', 'possible_inspect')):
+            controls[name] = (cx + p(14) + i * p(140), cy + ch - p(44) + d, p(128), p(32))
     actions = (('submit', 'cancel', 'delete') if search_text is not None else
                ('submit', 'cancel', 'calibrate', 'heatmap', 'snapshot') if calibration_active else
                ('voice', 'analyze', 'calibrate', 'heatmap', 'pause', 'fullscreen', 'snapshot', 'quit'))
@@ -155,10 +166,11 @@ def recent_event_rects(frame_shape, viewport_size=None, shifted=True):
 
 
 def control_hit_test(x, y, frame_shape, viewport_size=None, recent_events=(), *,
-                     search_text=None, calibration_active=False, show_help=False):
+                     search_text=None, calibration_active=False, show_help=False, possible=False):
     """Return a control name, ('event', id), or None; never perform an action."""
     for name, (rx, ry, rw, rh) in control_rects(frame_shape, viewport_size,
-            search_text=search_text, calibration_active=calibration_active, show_help=show_help).items():
+            search_text=search_text, calibration_active=calibration_active, show_help=show_help,
+            possible=possible).items():
         if rx <= x < rx + rw and ry <= y < ry + rh:
             return name
     if show_help:
@@ -723,7 +735,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
            viewport_size=None, status=None, captions=(), outlines=(), alert=None,
            heatmap_palette='amber', heatmap_opacity=0.44, search_text=None,
            search_answer=None, recent_events=(), heatmap_style='classic', show_help=False,
-           entry_kind='search', ai_status=None):
+           entry_kind='search', ai_status=None, possible=None):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -1018,6 +1030,24 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         diag_x = p(30) + heading_width + p(24) if layout.compact else p(30)
         diag_y = note_y + p(19) if layout.compact else note_y - p(5)
         _text(out, _fit('  |  '.join(info), layout.main_width - diag_x, 0.29 * s), diag_x, diag_y, 0.29 * s, CYAN)
+    # A calm "Possible knock on the door?" card instead of a red alert when the label is unsure.
+    if possible and not searching and not calibration_active:
+        cx, cy, cw, ch = possible_card_rect(layout)
+        overlay = out.copy()
+        _round_rect(overlay, (cx, cy, cw, ch), PANEL, p(12))
+        cv2.addWeighted(overlay, 0.92, out, 0.08, 0, dst=out)
+        _round_rect(out, (cx, cy, cw, ch), YELLOW, p(12), 1)
+        cv2.circle(out, (cx + p(18), cy + p(20)), max(2, p(4)), YELLOW, -1, cv2.LINE_AA)
+        _text(out, 'POSSIBLE', cx + p(30), cy + p(25), .3 * s, YELLOW, 2)
+        title = str(possible.get('watch') or 'a watched sound')
+        title = title[:1].upper() + title[1:] + '?'
+        _text(out, _fit(title, cw - p(130), .5 * s, True), cx + p(96), cy + p(27), .5 * s, TEXT, 2)
+        sub = '  /  '.join(str(b) for b in (possible.get('where'), possible.get('when'), 'was it?') if b)
+        _text(out, _fit(sub, cw - p(28), .3 * s), cx + p(16), cy + p(48), .3 * s, MUTED)
+        card_controls = control_rects(frame.shape, viewport_size, shifted=False, possible=True)
+        for name, icon, label in (('possible_yes', 'submit', 'Yes  (Y)'), ('possible_no', 'cancel', 'No  (U)'),
+                                  ('possible_inspect', 'search', 'Inspect  (I)')):
+            _button(out, card_controls[name], icon, label, s, accent=YELLOW if name == 'possible_yes' else None)
     # Toolbar: move the body (everything between the header and the old footer) down by one bar,
     # then draw the action buttons in the gap, right under the header where they are easy to see.
     top, bottom, d = p(BODY_TOP), footer_y, _shift(layout)

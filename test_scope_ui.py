@@ -243,7 +243,7 @@ class Dashboard(unittest.TestCase):
     def test_captions_never_overlap_after_screen_edge_clamping(self):
         from unittest.mock import patch
         image = np.zeros((360, 640, 3), np.uint8)
-        captions = [{'text': f'Saved caption {i}', 'pixel': (320 + i * 4, 20), 'kind': 'speech'} for i in range(12)]
+        captions = [{'text': f'Saved caption {i}', 'pixel': (320 + i * 4, 20), 'kind': 'label'} for i in range(12)]
         with patch.object(scope_ui, '_round_rect', wraps=scope_ui._round_rect) as draw:
             scope_ui._captions(image, captions, 1.0)
         boxes = [call.args[1] for call in draw.call_args_list]
@@ -253,6 +253,17 @@ class Dashboard(unittest.TestCase):
             self.assertLessEqual(y + h, image.shape[0])
             for bx, by, bw, bh in boxes[i + 1:]:
                 self.assertFalse(x < bx + bw and bx < x + w and y < by + bh and by < y + h)
+
+    def test_speech_is_subtitled_at_the_bottom_never_over_faces(self):
+        image = np.full((360, 640, 3), 90, np.uint8)
+        before = image.copy()
+        caps = [{'text': f'Speaker {i}: words {i}', 'speaker': f'Speaker {i}', 'spoken': f'words {i}',
+                 'where': 'to the left' if i % 2 else 'to the right', 'pixel': (100 + 80 * i, 60), 'kind': 'speech'}
+                for i in range(1, 5)]
+        scope_ui._captions(image, caps, 1.0)
+        np.testing.assert_array_equal(image[:200], before[:200])     # the upper picture (faces) is untouched
+        self.assertFalse(np.array_equal(image[300:], before[300:]))  # subtitles along the bottom
+        self.assertNotEqual(scope_ui._talker_color('Speaker 1'), scope_ui._talker_color('Speaker 2'))
 
     def test_recent_events_are_real_input_and_preserve_camera(self):
         from unittest.mock import patch
