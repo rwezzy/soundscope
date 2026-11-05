@@ -48,7 +48,11 @@ META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no 
 # A spend-control heuristic for this recording gain, NOT calibrated dB SPL.
 # Quiet recordings remain available locally; explicit analysis can override this
 # digital floor, but never spatial-evidence, rate, or budget checks.
-AUTO_META_MIN_PEAK_DBFS = -50.0
+# The XVF3800's raw mics record quietly: at 1 m a whistle peaked at -60 dBFS, a hum at -66, snaps and
+# claps at -65 to -78 (Nov 4). A -50 dBFS floor blocked nearly every real sound, speech included,
+# from automatic labels and captions. This floor only rejects near-silent glitches now; the
+# over-the-room SNR gates (META_MIN_SNR_DB) decide what is worth a request.
+AUTO_META_MIN_PEAK_DBFS = -80.0
 _ACTIVITY_LABELS = {
     'source_check': 'Muse Spark: sound and scene',
     'classify_sound': 'Muse Spark: sound label',

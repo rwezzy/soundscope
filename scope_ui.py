@@ -78,13 +78,26 @@ def _layout(frame_shape, viewport_size=None):
                    main_width + px(48), px(288), h, px(108) + h + px(20), px(74), False)
 
 
+# The action buttons sit in a toolbar under the header (they were hard to see along the bottom
+# edge). render() draws the body as before and moves it down by BAR; the public geometry
+# helpers below apply the same shift, so mouse mapping stays exact.
+BAR = 46
+BODY_TOP = 78
+
+
+def _shift(layout):
+    return int(round(BAR * layout.scale))
+
+
 def camera_rect(frame_shape, viewport_size=None):
     """Return displayed camera (x, y, width, height), excluding all letterboxing.
 
     Pass the same ``viewport_size=(width, height)`` used by ``render``. Without a
     viewport the camera is native resolution; with one it is uniformly fitted.
     """
-    return _layout(frame_shape, viewport_size).camera
+    layout = _layout(frame_shape, viewport_size)
+    x, y, w, h = layout.camera
+    return x, y + _shift(layout), w, h
 
 
 def canvas_to_frame(x, y, frame_shape, viewport_size=None):
@@ -103,7 +116,7 @@ def camera_rgb_crop(canvas, frame_shape, viewport_size=None):
 
 
 def control_rects(frame_shape, viewport_size=None, *, search_text=None,
-                  calibration_active=False, show_help=False):
+                  calibration_active=False, show_help=False, shifted=True):
     """Named clickable controls; shared by drawing and mouse hit testing."""
     layout = _layout(frame_shape, viewport_size)
     p = lambda value: int(round(value * layout.scale))
@@ -113,14 +126,15 @@ def control_rects(frame_shape, viewport_size=None, *, search_text=None,
         hh = min(layout.height - p(40), p(550))
         hx, hy = (layout.width - hw) // 2, (layout.height - hh) // 2
         return {'help': (hx + hw - p(116), hy + hh - p(46), p(92), p(30))}
+    d = _shift(layout) if shifted else 0  # render() draws the body unshifted, then moves it
     controls = {
         'search': (layout.width - p(386), p(24), p(126), p(32)),
         'history': (layout.width - p(248), p(24), p(126), p(32)),
         'help': (layout.width - p(110), p(24), p(86), p(32)),
-        'palette': (sx + p(16), p(540), sw - p(32), p(30)),
-        'style': (sx + p(16), p(580), sw - p(32), p(30)),
-        'opacity_down': (sx + sw - p(82), p(624), p(28), p(27)),
-        'opacity_up': (sx + sw - p(44), p(624), p(28), p(27)),
+        'palette': (sx + p(16), p(540) + d, sw - p(32), p(30)),
+        'style': (sx + p(16), p(580) + d, sw - p(32), p(30)),
+        'opacity_down': (sx + sw - p(82), p(624) + d, p(28), p(27)),
+        'opacity_up': (sx + sw - p(44), p(624) + d, p(28), p(27)),
     }
     actions = (('submit', 'cancel', 'delete') if search_text is not None else
                ('submit', 'cancel', 'calibrate', 'heatmap', 'snapshot') if calibration_active else
@@ -129,14 +143,14 @@ def control_rects(frame_shape, viewport_size=None, *, search_text=None,
     gap = p(7)
     button_width = (available - gap * (len(actions) - 1)) // len(actions)
     for i, action in enumerate(actions):
-        controls[action] = (p(24) + i * (button_width + gap), layout.height - p(45), button_width, p(34))
+        controls[action] = (p(24) + i * (button_width + gap), p(BODY_TOP) + p(6), button_width, p(34))
     return controls
 
 
-def recent_event_rects(frame_shape, viewport_size=None):
+def recent_event_rects(frame_shape, viewport_size=None, shifted=True):
     layout = _layout(frame_shape, viewport_size)
     p = lambda value: int(round(value * layout.scale))
-    return [(layout.sidebar_x + p(10), p(354 + i * 43),
+    return [(layout.sidebar_x + p(10), p(354 + i * 43) + (_shift(layout) if shifted else 0),
              layout.sidebar_width - p(20), p(39)) for i in range(3)]
 
 
@@ -675,7 +689,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     _text(out, 'Scope', p(70) + _width('Sound', .85 * s, True), p(43), .85 * s,
           YELLOW, max(2, p(2)))
     _text(out, 'SEE SOUND. REMEMBER WHAT HAPPENED.', p(71), p(62), 0.28 * s, MUTED)
-    controls = control_rects(frame.shape, viewport_size, search_text=search_text,
+    controls = control_rects(frame.shape, viewport_size, shifted=False, search_text=search_text,
                              calibration_active=calibration_active)
     for name, label in (('search', 'Search'), ('history', 'History'), ('help', 'Help')):
         _button(out, controls[name], name, label, s, accent=PINK if name == 'search' else None)
@@ -819,7 +833,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
 
     card(320, 170, 'RECENT EVENTS / CLICK TO OPEN')
     if recent_events:
-        for event, rect in zip(tuple(recent_events)[:3], recent_event_rects(frame.shape, viewport_size)):
+        for event, rect in zip(tuple(recent_events)[:3], recent_event_rects(frame.shape, viewport_size, shifted=False)):
             ex, ey, ew, eh = rect
             _round_rect(out, rect, PANEL2, p(8))
             sound = event.get('sound') or {}
@@ -896,7 +910,6 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
               CYAN if view.get('hold') else MUTED)
 
     footer_y = layout.height - p(56)
-    cv2.line(out, (p(24), footer_y), (layout.width - p(24), footer_y), LINE, 1)
     buttons = ([('submit', 'Save label' if naming else 'Search'), ('cancel', 'Cancel'), ('delete', 'Delete')]
                if searching else
                [('submit', 'Apply calibration'), ('cancel', 'Cancel'), ('calibrate', 'Restart'),
@@ -904,14 +917,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
                [('voice', 'Voice'), ('analyze', 'Analyze sound'), ('calibrate', 'Calibrate'),
                 ('heatmap', 'Heatmap'), ('pause', 'Resume' if paused else 'Pause'),
                 ('fullscreen', 'Fullscreen'), ('snapshot', 'Snapshot'), ('quit', 'Finish')])
-    for action, label in buttons:
-        active = (action == 'heatmap' and heatmap) or (action == 'pause' and paused)
-        icon = 'play' if action == 'pause' and paused else action
-        _button(out, controls[action], icon, label, s, active=active,
-                accent=PINK if action in ('voice', 'analyze', 'submit') else None)
     fps_value = _number(fps)
-    if fps_value is not None:
-        _text(out, f'{max(0, fps_value):.1f} FPS', layout.width - p(98), footer_y - p(8), 0.28 * s, MUTED)
 
     if diagnostics and not searching:
         coherence = _number(fix.get('coherence')) if fresh else None
@@ -929,6 +935,18 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         diag_x = p(30) + heading_width + p(24) if layout.compact else p(30)
         diag_y = note_y + p(19) if layout.compact else note_y - p(5)
         _text(out, _fit('  |  '.join(info), layout.main_width - diag_x, 0.29 * s), diag_x, diag_y, 0.29 * s, CYAN)
+    # Toolbar: move the body (everything between the header and the old footer) down by one bar,
+    # then draw the action buttons in the gap, right under the header where they are easy to see.
+    top, bottom, d = p(BODY_TOP), footer_y, _shift(layout)
+    out[top + d:bottom + d] = out[top:bottom].copy()
+    out[top:top + d] = BG
+    for action, label in buttons:
+        active = (action == 'heatmap' and heatmap) or (action == 'pause' and paused)
+        icon = 'play' if action == 'pause' and paused else action
+        _button(out, controls[action], icon, label, s, active=active,
+                accent=PINK if action in ('voice', 'analyze', 'submit') else None)
+    if fps_value is not None:
+        _text(out, f'{max(0, fps_value):.1f} FPS', layout.width - p(98), layout.height - p(14), 0.28 * s, MUTED)
     if show_help:
         shade = np.full_like(out, BG)
         cv2.addWeighted(out, .32, shade, .68, 0, dst=out)
