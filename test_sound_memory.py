@@ -190,7 +190,7 @@ class Records(unittest.TestCase):
         result = sm.search('when did the phone ring?', records, meta, now=self.now)
         self.assertEqual(result['source'], 'muse-spark')
         self.assertEqual([r['id'] for r in result['matches']], [records[0]['id']])
-        self.assertIn('phone rang', result['answer'])
+        self.assertIn('Phone ringing', result['answer'])
         table = meta.answer_query.call_args.args[1]
         self.assertIn(records[0]['id'], table)
         self.assertIn('phone ringing (muse-spark 0.90)', table)
@@ -206,6 +206,76 @@ class Records(unittest.TestCase):
         self.assertEqual(len(result['matches']), 1)
         self.assertIn('budget', result['answer'])
         self.assertEqual(sm.search('anything', [], None)['answer'], 'No sounds recorded yet.')
+
+    def test_phone_history_question_returns_historical_highlight_and_level_units(self):
+        rec = self.record(label='phone ringing', when=self.now - 30)
+        unrelated = self.record(label='hand clap', when=self.now - 5)
+        result = sm.search('was there any point my phone rang?', [rec, unrelated], now=self.now)
+        self.assertEqual([r['id'] for r in result['matches']], [rec['id']])
+        mark = result['highlights'][0]
+        self.assertEqual(mark['record_id'], rec['id'])
+        self.assertEqual(mark['pixel'], [320, 200])
+        self.assertEqual(mark['point_m'], rec['where']['point_m'])
+        self.assertTrue(mark['historical'])
+        self.assertFalse(mark['source_verified'])
+        self.assertIn('UTC', result['answer'])
+        self.assertIn('2026-11-04', result['answer'])
+        self.assertIn('dB SNR', result['answer'])
+        self.assertIn('-30.0 dBFS', result['answer'])
+        self.assertIn('not calibrated dB SPL', result['answer'])
+        self.assertRegex(rec['time'], r'T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$')
+
+    def test_phone_query_does_not_call_unlabelled_tone_a_phone(self):
+        self.assertEqual(sm.local_search('did my phone ring?', [self.record()], now=self.now), [])
+
+    def test_model_cannot_invent_hidden_location_time_or_loudness(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        rec = self.record(label='phone ringing', near='the desk', when=self.now - 30)
+        meta = SimpleNamespace(answer_query=mock.Mock(return_value={
+            'matches': [rec['id'], rec['id']],
+            'answer': 'Your phone was under the pillow at midnight and measured 100 dB SPL.'}))
+        result = sm.search('where was my phone ringing?', [rec], meta, now=self.now)
+        self.assertEqual(len(result['matches']), 1)
+        self.assertNotIn('pillow', result['answer'])
+        self.assertNotIn('midnight', result['answer'])
+        self.assertNotIn('100 dB', result['answer'])
+        self.assertIn('near the desk', result['answer'])
+
+    def test_model_answer_without_real_ids_cannot_claim_an_event(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        rec = self.record(label='clap')
+        meta = SimpleNamespace(answer_query=mock.Mock(return_value={
+            'matches': ['invented'], 'answer': 'The phone definitely rang under the pillow.'}))
+        result = sm.search('did my phone ring?', [rec], meta, now=self.now)
+        self.assertEqual(result['matches'], [])
+        self.assertNotIn('pillow', result['answer'])
+        self.assertIn('No matching sound', result['answer'])
+
+    def test_empty_time_window_does_not_widen_or_spend_a_model_call(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        rec = self.record(label='phone ringing', when=self.now - 3600)
+        meta = SimpleNamespace(answer_query=mock.Mock())
+        result = sm.search('phone ringing in the last 2 minutes', [rec], meta, now=self.now)
+        self.assertEqual(result['matches'], [])
+        self.assertIn('for that time', result['answer'])
+        meta.answer_query.assert_not_called()
+
+    def test_occlusion_context_requires_observed_placement_evidence(self):
+        rec = self.record(label='phone ringing', near='under the pillow')
+        self.assertNotIn('under the pillow', sm.phrase(rec, now=self.now))
+        self.assertNotIn('under the pillow', sm.table([rec], now=self.now))
+        rec['spatial_evidence'] = {'verified': True, 'method': 'observed_placement',
+                                   'text': 'phone under the pillow'}
+        self.assertIn('under the pillow', sm.phrase(rec, now=self.now))
+
+    def test_nonfinite_depth_is_not_saved_as_a_real_distance(self):
+        rec = sm.make_record(fix(), [0, 0, 1], view={'point': [0, 0, float('nan')], 'measured': True},
+                             now=self.now)
+        self.assertIsNone(rec['where']['point_m'])
+        self.assertIsNone(rec['where']['distance_m'])
 
 
 class Examples(unittest.TestCase):

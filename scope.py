@@ -10,7 +10,8 @@
   python scope.py --record demo.mp4          also save the annotated video
 
 Keys: V = voice command, L = last sounds, C = three-position calibration, Enter = apply,
-Esc = cancel, H = heat map, D = diagnostics, Space = pause, S = evidence snapshot, Q = quit.
+Esc = cancel, H = heat map, M = map colours, D = diagnostics, Space = pause,
+T = type a history question, S = evidence snapshot, Q = quit.
 Voice: press V and say "find my keys", "follow the phone ringing", "stop", "show everything",
 "when did the phone ring?", "who is talking?" or "what was that?".
 
@@ -183,6 +184,41 @@ def make_view(ev, final, loc, depth_mm, k, cfg):
         view['contour'] = outline(depth_mm, k, *view['spot'])
         view['reach'] = aim.reach_check(aim.camera_to_base(points[i, j] * 1000.0, cfg), cfg)
     return view
+
+
+def export_target(writer, view, *, paused=False, calibrating=False, hunt=None, now=None):
+    """Export only current acoustic/depth evidence, never a frozen display or a remembered sound.
+
+    The optional consumer is a separate, explicitly armed program. This viewer never controls
+    the arm. A selected surface is an acoustic candidate, not a verified sounding object.
+    """
+    if writer is None:
+        return
+    hunt = hunt or {}
+    verdict = (view or {}).get('verdict') or {}
+    confirmed = verdict.get('match') is True and isinstance(verdict.get('confidence'), (int, float)) \
+        and math.isfinite(verdict['confidence']) and verdict['confidence'] >= 0.5
+    reason = ('Viewer paused' if paused or hunt.get('mode') == 'paused' else
+              'Calibration active; restart the consumer after saving' if calibrating else
+              'Waiting for a new sound' if view is None else
+              'Semantic target is not freshly confirmed' if
+              hunt.get('target') and not confirmed else None)
+    if reason:
+        return writer.invalidate(reason)
+    return writer.publish(view, now=now)
+
+
+def edit_search_input(text, key):
+    """Small nonblocking ASCII input editor for the OpenCV viewer."""
+    if key == 27:
+        return None, 'cancel'
+    if key in (10, 13):
+        return text.strip(), 'submit' if text.strip() else 'edit'
+    if key in (8, 127):
+        return text[:-1], 'edit'
+    if 32 <= key <= 126 and len(text) < 240:
+        return text + chr(key), 'edit'
+    return text, 'edit'
 
 
 def calibrate_yaw(cfg, fix, click, depth_mm, k):
@@ -589,6 +625,7 @@ class TimedRecorder:
     """Resample display frames to 15 fps using elapsed time, without speeding up video."""
     def __init__(self, path, fps=15, factory=cv2.VideoWriter):
         self.path, self.fps, self.factory = path, fps, factory
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.writer, self.previous, self.started, self.written = None, None, None, 0
         self.size = None
 
@@ -917,6 +954,14 @@ def run(args, cfg):
     profile = cfg.get('profile') or {}
     YAW_FILE = profile.get('path') if profile.get('has_yaw') else None
     ui = {'note': 'Listening. Fixed camera + microphone. Robot control is off.', 'last': None}
+    target_writer = None
+    if getattr(args, 'target_file', None):
+        if cfg['camera']['mount'] != 'base' or cfg.get('array', {}).get('on_arm'):
+            raise SystemExit('Depth target export currently requires a fixed camera and microphone.')
+        from target_link import TargetWriter
+        target_writer = TargetWriter(args.target_file, cfg)
+        target_writer.invalidate('Viewer starting; no measured target yet')
+        ui['note'] = 'Listening. Local depth-target export enabled; this viewer does not move the arm.'
     try:
         session = Session(args, cfg, ui)
     except MetaError as exc:
@@ -931,10 +976,22 @@ def run(args, cfg):
     shape, click = None, None
     view, latest, meta_worker, evidence_frame = None, None, None, None
     heatmap, diagnostics, paused = not args.no_heatmap, args.diagnostics, False
+    heatmap_palette = getattr(args, 'palette', 'turbo')
+    heatmap_opacity = getattr(args, 'heatmap_opacity', 0.65)
     pause_time, held = None, None
     viewport = initial_viewport()
     displayed_viewport = None
     displayed = None
+    search_text, search_worker = None, None
+
+    def ask_history(question):
+        try:
+            # Explicit user query: use the existing Meta session if enabled; otherwise free local search.
+            answer = session.ask({'action': 'search', 'question': question}, question)
+            say(ui, answer)
+            ui['search_answer'] = (answer, time.monotonic() + 20)
+        except Exception as exc:
+            say(ui, f'History search unavailable: {exc}')
 
     def on_mouse(event, x, y, flags, param):
         nonlocal click
@@ -1074,6 +1131,7 @@ def run(args, cfg):
             else:
                 frame, depth, k = held
             now = time.monotonic()  # include scoring work in freshness checks
+            export_target(target_writer, view, paused=paused, calibrating=cal.active, hunt=hunt, now=now)
             if cal.active and click is not None:
                 xy, clicked_event, clicked_depth, clicked_k, clicked_at = click
                 say(ui, cal.click(xy, clicked_event, clicked_depth, clicked_k, cfg, clicked_at))
@@ -1088,6 +1146,10 @@ def run(args, cfg):
                        now=pause_time if paused else now,
                        fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
+                       heatmap_palette=heatmap_palette, heatmap_opacity=heatmap_opacity,
+                       search_text=search_text,
+                       search_answer=(ui['search_answer'][0] if ui.get('search_answer') and
+                                      now < ui['search_answer'][1] else None),
                        viewport_size=viewport, captions=session.captions,
                        outlines=[poly for polys, _ in session.outlines for poly in polys],
                        alert=session.alert[0] if session.alert else None)
@@ -1097,6 +1159,18 @@ def run(args, cfg):
             if recorder:
                 recorder.write(out, now)
             key = cv2.waitKey(1) & 0xFF
+            if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                break
+            if search_text is not None:
+                search_text, action = edit_search_input(search_text, key)
+                if action == 'submit':
+                    question, search_text = search_text, None
+                    say(ui, f'Searching sound history: {question}')
+                    search_worker = threading.Thread(target=ask_history, args=(question,), daemon=True)
+                    search_worker.start()
+                elif action == 'cancel':
+                    say(ui, 'Search cancelled.')
+                continue
             if ord('A') <= key <= ord('Z'):
                 key += ord('a') - ord('A')
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
@@ -1110,6 +1184,12 @@ def run(args, cfg):
                     say(ui, f'Voice needs MODEL_API_KEY in meta-soundscope/.env: {exc}')
                 except queue.Full:
                     say(ui, 'Still recording the last command.')
+            elif key == ord('t'):
+                if search_worker is not None and search_worker.is_alive():
+                    say(ui, 'Finishing the previous history search.')
+                else:
+                    search_text = ''
+                    say(ui, 'Type a question about recorded sounds; ENTER searches, ESC cancels.')
             elif key == ord('l'):
                 last = session.memory.recent(5) if session.memory is not None else []
                 for rec in last:
@@ -1117,6 +1197,8 @@ def run(args, cfg):
                 say(ui, sound_memory.phrase(last[-1]) if last else 'No sounds in memory yet.')
             elif key == ord('c') and not paused:
                 say(ui, cal.start(cfg))
+                if target_writer:
+                    target_writer.invalidate('Calibration active')
             elif key == 27:
                 cal.active, click = False, None
                 say(ui, 'Calibration cancelled. Existing settings kept.')
@@ -1124,15 +1206,26 @@ def run(args, cfg):
                 try:
                     say(ui, cal.apply(cfg))
                     view, latest, evidence_frame = None, None, None
+                    if target_writer:
+                        # Calibration changed the geometry: a running consumer must reload its profile.
+                        from target_link import TargetWriter
+                        target_writer = TargetWriter(args.target_file, cfg)
+                        target_writer.invalidate('Calibration changed; restart arm_target.py')
                 except (OSError, ValueError) as exc:
                     say(ui, f'Could not save calibration: {exc}')
             elif key == ord('h'):
                 heatmap = not heatmap
+            elif key == ord('m'):
+                choices = tuple(scope_ui.HEATMAP_PALETTES)
+                heatmap_palette = choices[(choices.index(heatmap_palette) + 1) % len(choices)]
+                say(ui, f'Heatmap colour: {heatmap_palette}. M changes colour; H hides/shows the overlay.')
             elif key == ord('d'):
                 diagnostics = not diagnostics
             elif key == ord(' '):
                 paused = not paused
                 pause_time = now if paused else None
+                if paused and target_writer:
+                    target_writer.invalidate('Viewer paused')
                 if not paused:
                     view, latest, evidence_frame = None, None, None
             elif key == ord('s'):
@@ -1140,6 +1233,11 @@ def run(args, cfg):
                 path = save_snapshot(out, source, source_depth, source_k, cfg, latest, loc, frame_at=frame_at)
                 say(ui, f'Saved {path.name} and available sensor evidence.')
     finally:
+        if target_writer:
+            try:
+                target_writer.invalidate('Viewer closed')
+            except OSError as exc:
+                print(f'Target cleanup warning: {exc}', flush=True)
         session.close()
         stop.set()
         if process.pid is not None:
@@ -1178,9 +1276,15 @@ def main():
     p.add_argument('--seconds', type=float, help='stop after this long')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
+    p.add_argument('--palette', choices=tuple(scope_ui.HEATMAP_PALETTES), default='turbo',
+                   help='heatmap colours (M cycles while running)')
+    p.add_argument('--heatmap-opacity', type=float, default=0.65, help='heatmap strength, 0 to 0.85')
     p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
     p.add_argument('--env-file', help='also load keys from this .env file')
+    p.add_argument('--target-file', help='export fresh depth candidates locally for arm_target.py; no motion here')
     args = p.parse_args()
+    if not math.isfinite(args.heatmap_opacity) or not 0 <= args.heatmap_opacity <= .85:
+        p.error('--heatmap-opacity must be between 0 and 0.85')
     load_env(ENV_FILE)
     if args.env_file:
         load_env(args.env_file)

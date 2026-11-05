@@ -53,6 +53,11 @@ class Profiles(unittest.TestCase):
 class Wrist(unittest.TestCase):
     def setUp(self):
         self.cfg = aim.load_config(profile='wrist')
+        # This geometry test intentionally exercises a full historical dry turn.
+        # Real diagnostic defaults are independently tested as single <=5° steps.
+        self.cfg['safety'].update(max_step_deg=30, deadband_deg=6, min_interval_s=1.5,
+                                  yaw_window_deg=[-90, 90], pitch_window_deg=[-15, 15],
+                                  single_step_per_sound=False)
 
     def test_errors_are_relative_to_the_camera_view(self):
         for yaw, pitch in ((0, 0), (25, 0), (-40, 10), (10, -20)):

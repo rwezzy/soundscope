@@ -3,6 +3,7 @@ import asyncio
 import copy
 import importlib.util
 import math
+import re
 import tomllib
 import unittest
 from types import SimpleNamespace
@@ -12,11 +13,20 @@ import numpy as np
 
 import aim
 
-CFG = aim.load_config()
-# Fixed geometry, so the tests don't depend on what you measured into arm_config.toml.
-CFG['array'].update(mount='flat', position_mm=[200, -250, 0], front_yaw_deg=0)
+CFG = aim.load_config(profile='')
+# Historical test fixture: live diagnostic settings may become more restrictive
+# without changing the independent geometry, stepping and speed-check cases below.
+CFG['safety'].update(speed_deg_s=15, accel_deg_s2=60, max_step_deg=30, deadband_deg=6,
+                     min_interval_s=1.5, yaw_window_deg=[-90, 90], pitch_window_deg=[-15, 15],
+                     min_confidence_z=12, min_snr_db=-20, mute_after_move_s=0.8,
+                     single_step_per_sound=False, move_timeout_s=30, max_sound_age_s=1.5)
+CFG['array'].update(mount='flat', position_mm=[200, -250, 0], front_yaw_deg=0,
+                    mirror=False, on_arm=False)
 CFG['camera'].update(mount='base')
 CFG['camera']['base'].update(position_mm=[150, 250, 60], yaw_deg=0, pitch_deg=0)
+CFG['look'].update(start_joints_deg=[0, 0, 90, 0, 90, 0], reach_mm=250, lateral_mm=0,
+                    heading_deg=0, height_mm=250, pitch_deg=0)
+CFG['aim'].update(assumed_distance_mm=1000, use_pitch=False)
 
 
 def cfg_with(**sections):
@@ -105,9 +115,9 @@ class Safety(unittest.TestCase):
 
     def test_unsure_or_faint_fixes_are_rejected(self):
         g = self.gate()
-        self.assertIn('not sure', g.accept({'z': 5, 'snr_db': 0}))
-        self.assertIn('faint', g.accept({'z': 50, 'snr_db': -40}))
-        self.assertIsNone(g.accept({'z': 50, 'snr_db': -10}))
+        self.assertIn('not sure', g.accept({'z': 5, 'snr_db': 0, 'direction': [1, 0, 0]}))
+        self.assertIn('faint', g.accept({'z': 50, 'snr_db': -40, 'direction': [1, 0, 0]}))
+        self.assertIsNone(g.accept({'z': 50, 'snr_db': -10, 'direction': [1, 0, 0]}))
 
     def test_start_near_a_limit_only_allows_moving_back(self):
         g = self.gate(start=(0, 0, 90, 0, 120, 0))  # J5 limit is 124; the margin keeps us under 114
@@ -118,10 +128,11 @@ class Safety(unittest.TestCase):
             self.gate(start=(500, 0, 90, 0, 90, 0))
 
     def test_config_caps_cannot_be_exceeded(self):
-        text = aim.CONFIG_FILE.read_text().replace('speed_deg_s = 15', 'speed_deg_s = 90')
+        text = re.sub(r'(?m)^speed_deg_s\s*=\s*[^#\r\n]+', 'speed_deg_s = 90 ',
+                      aim.CONFIG_FILE.read_text(), count=1)
         with mock.patch('builtins.open', mock.mock_open(read_data=text.encode())):
             with self.assertRaises(SystemExit):
-                aim.load_config()
+                aim.load_config(profile='')
         self.assertEqual(tomllib.loads(text)['safety']['speed_deg_s'], 90)
 
 

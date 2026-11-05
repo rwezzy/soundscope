@@ -10,15 +10,17 @@
 [safety]
 # Master switch. The arm only moves when this is true AND you run with --live AND type MOVE.
 live = false
-speed_deg_s = 15               # joint speed, sent to the arm before any move (code refuses > 30)
-accel_deg_s2 = 60              # joint acceleration (code refuses > 200)
+speed_deg_s = 5                # diagnostic joint speed, sent before any move (code refuses > 30)
+accel_deg_s2 = 10              # gentle diagnostic joint acceleration (code refuses > 200)
 collision_sensitivity = 4      # Viam arm attribute: 0 = off .. 5 = stops with the least force
-max_step_deg = 30              # biggest single turn; longer turns happen in steps (cap 45)
-deadband_deg = 6               # ignore aim changes smaller than this
-min_interval_s = 1.5           # minimum time between new turns
-yaw_window_deg = [-45, 80]     # J1 may only turn this far either side of where it started (cap 170).
-                               # Demo desk, start J1 about -90: walls are to the right (-) and behind, so only
-                               # 45 that way (10+ cm clear even fully stretched); left (+) is open desk.
+max_step_deg = 5               # at most five degrees per fresh accepted sound
+deadband_deg = 3               # ignore aim changes smaller than this
+min_interval_s = 2             # minimum time between new turns
+single_step_per_sound = true   # require a NEW sound after each diagnostic step
+max_sound_age_s = 1.5          # capture age, checked again immediately before movement
+move_timeout_s = 10            # bounds the RPC and completion polling together
+yaw_window_deg = [-15, 15]     # relative to pose at controller startup; NOT collision avoidance
+                               # Restarting captures a new origin. Verify clearance before each live run.
 pitch_window_deg = [-15, 15]   # same for J5, used only when aim.use_pitch = true (cap 30)
 min_confidence_z = 12          # only turn for "solid" sound fixes (z, as mic_test prints it)
 min_snr_db = -20               # faint is fine as long as z is high

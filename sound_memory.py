@@ -233,7 +233,7 @@ def worth_remembering(fix):
 
 
 def new_id(now=None):
-    stamp = datetime.fromtimestamp(now or time.time()).strftime('%Y%m%d-%H%M%S')
+    stamp = datetime.fromtimestamp(time.time() if now is None else now).strftime('%Y%m%d-%H%M%S')
     return f'ev-{stamp}-{uuid.uuid4().hex[:4]}'
 
 
@@ -250,11 +250,15 @@ def make_record(fix, direction_cam, *, profile=None, view=None, level=None, mode
     elevation = math.degrees(math.atan2(-y, math.hypot(x, z)))
     view = view or {}
     point = view.get('point')
+    if point is not None:
+        point = np.asarray(point, dtype=float)
+        if point.shape != (3,) or not np.isfinite(point).all() or point[2] <= 0:
+            point = None
     distance = float(np.linalg.norm(point)) if point is not None and view.get('measured') else None
     snr = fix.get('snr_db')
     snr = float(snr) if snr is not None and math.isfinite(float(snr)) else None
     record = {
-        'id': new_id(now), 'time': datetime.fromtimestamp(now).isoformat(timespec='seconds'), 'epoch': round(now, 3),
+        'id': new_id(now), 'time': timestamp(now), 'epoch': round(now, 3),
         'mode': mode,
         'duration_s': round(float(fix.get('seconds') or (profile or {}).get('duration_s') or 0.0), 2),
         'where': {'azimuth_deg': round(azimuth, 1), 'elevation_deg': round(elevation, 1),
@@ -263,6 +267,8 @@ def make_record(fix, direction_cam, *, profile=None, view=None, level=None, mode
                   'on_screen': 'spot' in view and 'off_screen' not in view,
                   'pixel': [int(v) for v in view['spot']] if 'spot' in view and 'off_screen' not in view else None,
                   'point_m': [round(float(c), 3) for c in point] if distance is not None else None,
+                  'distance_kind': 'candidate_surface' if distance is not None else None,
+                  'source_verified': False,
                   'quality': (view.get('quality') or {}).get('state'),
                   'z': round(float(fix.get('z', 0.0)), 1)},
         'loudness': {'snr_db': round(snr, 1) if snr is not None else None, 'words': loudness_words(snr),
@@ -361,8 +367,15 @@ def _json_default(value):
 # ---------------------------------------------------------------------------------------------
 # Semantic phrases
 
+def timestamp(epoch):
+    """Unambiguous local wall time with its UTC offset, including millisecond precision."""
+    return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec='milliseconds')
+
+
 def clock(epoch):
-    return datetime.fromtimestamp(epoch).strftime('%I:%M:%S %p').lstrip('0')
+    moment = datetime.fromtimestamp(epoch).astimezone()
+    offset = moment.strftime('%z')
+    return moment.strftime('%I:%M:%S %p').lstrip('0') + f' UTC{offset[:3]}:{offset[3:]}'
 
 
 def ago(epoch, now):
@@ -403,31 +416,53 @@ def place_words(where):
     else:
         place = f'{side} of the camera' + (f', {vertical} it' if vertical else '')
     if where.get('distance_m'):
-        place = f"about {where['distance_m']:.1f} m away, {place}"
+        place = f"candidate surface about {where['distance_m']:.1f} m away, {place}"
     return place
+
+
+HIDDEN_RELATION = re.compile(r'\b(?:under(?:neath)?|beneath|inside|behind|hidden|covered\s+by)\b', re.I)
+
+
+def witnessed_context(record, text):
+    """Do not turn an acoustic hit near an occluder into a claim about what is underneath it.
+
+    A model's sound/sight agreement is not an observed placement. Such relationships require
+    an explicit record spatial_evidence={verified: true, method: 'observed_placement', text: ...}.
+    Current visual context alone does not supply that evidence.
+    """
+    if not text or not HIDDEN_RELATION.search(str(text)):
+        return text
+    evidence = record.get('spatial_evidence') or {}
+    if (evidence.get('verified') is True and evidence.get('method') == 'observed_placement' and
+            str(text).lower() in str(evidence.get('text', '')).lower()):
+        return text
+    return None
 
 
 def phrase(record, now=None):
     """One sentence answering where, when, how loud, what, and what was near."""
     now = time.time() if now is None else now
     w, loud = record.get('where') or {}, record.get('loudness') or {}
-    parts = [f"{what_it_was(record)[:1].upper()}{what_it_was(record)[1:]} at {clock(record['epoch'])} "
+    date = datetime.fromtimestamp(record['epoch']).strftime('%Y-%m-%d')
+    parts = [f"{what_it_was(record)[:1].upper()}{what_it_was(record)[1:]} at {clock(record['epoch'])} on {date} "
              f"({ago(record['epoch'], now)})"]
     parts.append(place_words(w))
     if loud.get('snr_db') is not None:
-        parts.append(f"{loud['words']} ({loud['snr_db']:+.0f} dB over the room)")
+        parts.append(f"{loud['words']} ({loud['snr_db']:+.0f} dB SNR above the estimated room noise)")
+    if loud.get('rms_dbfs') is not None:
+        parts.append(f"{loud['rms_dbfs']:.1f} dBFS recorded level; not calibrated dB SPL")
     if record.get('duration_s'):
         parts.append(f"{record['duration_s']:.1f} s long")
     src = record.get('source') or {}
-    obj = src.get('object', '')
+    obj = witnessed_context(record, src.get('object', '')) or ''
     if obj and obj.lower() not in ('nothing distinct', 'nothing', 'unknown', ''):
-        agree = {'yes': 'sound and sight agree', 'no': 'sound and sight disagree; the source may be hidden',
+        agree = {'yes': 'sound and sight agree (model judgment; source unverified)', 'no': 'sound and sight disagree; source unverified',
                  'unsure': 'unconfirmed'}.get(src.get('consistent'), 'unconfirmed')
-        action = src.get('action', '')
+        action = witnessed_context(record, src.get('action', '')) or ''
         quiet = ('nothing', 'not checked', 'unknown', 'no before', 'none')
         seen = obj + (f' ({action})' if action and not any(w in action.lower() for w in quiet) else '')
         parts.append(f'at the spot: {seen}, {agree}')
-    near = (record.get('near') or {}).get('text')
+    near = witnessed_context(record, (record.get('near') or {}).get('text'))
     if near and near.lower() not in obj.lower():
         parts.append(f'near {near}')
     text = ', '.join(parts) + '.'
@@ -445,7 +480,7 @@ STOP_WORDS = set('a an the is was were did do does when where what who which how
                  'for and or that this there any some sound sounds noise noises heard hear last time today ago '
                  'happened happen happening minute minutes min mins hour hours hr hrs second seconds sec secs day '
                  'days week yesterday past previous recent recently anything everything all show list tell give '
-                 'event events morning afternoon tonight just'.split())
+                 'event events morning afternoon tonight just point ever'.split())
 NUMBER_WORDS = {'a': 1, 'an': 1, 'one': 1, 'two': 2, 'three': 3, 'five': 5, 'ten': 10, 'few': 3, 'couple': 2}
 
 
@@ -478,8 +513,9 @@ def record_text(record):
     s, sp, near = record.get('sound') or {}, record.get('speech') or {}, record.get('near') or {}
     src = record.get('source') or {}
     bits = [s.get('label'), s.get('description'), s.get('local_label'), (record.get('acoustic') or {}).get('character'),
-            sp.get('text'), sp.get('speaker'), near.get('text'), (record.get('where') or {}).get('words'),
-            (record.get('loudness') or {}).get('words'), src.get('object'), src.get('action'), src.get('summary'),
+            sp.get('text'), sp.get('speaker'), witnessed_context(record, near.get('text')), (record.get('where') or {}).get('words'),
+            (record.get('loudness') or {}).get('words'), witnessed_context(record, src.get('object')),
+            witnessed_context(record, src.get('action')), witnessed_context(record, src.get('summary')),
             ' '.join(record.get('alerts') or [])]
     return ' '.join(str(b) for b in bits if b).lower()
 
@@ -489,6 +525,8 @@ def _tokens(text):
 
 
 def _stem(t):
+    if t == 'rang':
+        return 'ring'
     for suffix in ('ing', 'ed', 'es', 's'):
         if t.endswith(suffix) and len(t) - len(suffix) >= 3:
             return t[:-len(suffix)]
@@ -508,17 +546,25 @@ def local_search(question, records, now=None, limit=5):
     window = time_window(question, now)
     pool = [r for r in records if window is None or window[0] <= r['epoch'] <= window[1]]
     want = {_stem(t) for t in _tokens(question)}
+    exact_want = set(want)
+    phone_words = {'phone', 'telephone', 'cell', 'mobile', 'ringtone'}
+    phone_specific = bool(exact_want & phone_words) and not bool(exact_want & {'said', 'say', 'mention', 'talk'})
     for t in list(want):
         want |= {_stem(s) for s in SYNONYMS.get(t, ())}
     scored = []
     for r in pool:
+        sound = r.get('sound') or {}
+        labels = ' '.join(str(sound.get(k) or '') for k in ('label', 'local_label', 'description'))
+        label_tokens = {_stem(t) for t in _tokens(labels)}
+        if phone_specific and not label_tokens & phone_words:
+            continue  # a generic tonal sound or someone saying "phone" is not a phone ringing
         have = {_stem(t) for t in _tokens(record_text(r))}
         overlap = len(want & have)
         if want and overlap == 0:
             continue
         recency = math.exp(-(now - r['epoch']) / 3600)
         loud = 'loud' in want and (r.get('loudness') or {}).get('snr_db') or 0
-        scored.append((overlap + 0.3 * recency + 0.01 * loud, r))
+        scored.append((overlap + 3 * len(exact_want & label_tokens) + 0.3 * recency + 0.01 * loud, r))
     if not want:  # "what happened in the last 5 minutes": everything in the window, newest first
         scored = [(r['epoch'], r) for r in pool]
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -534,16 +580,21 @@ def table(records, now=None):
         what = s.get('label') or (f"like example '{s['local_label']}'" if s.get('local_label') else '') or \
             (r.get('acoustic') or {}).get('character', '')
         conf = f" ({s['source']} {s['confidence']:.2f})" if s.get('label') and s.get('confidence') is not None else ''
-        bits = [r['id'], datetime.fromtimestamp(r['epoch']).strftime('%a %H:%M:%S'), f'{what}{conf}',
-                w.get('words', '?') + (f", {w['distance_m']:.1f} m" if w.get('distance_m') else ''),
-                f"{loud.get('words', '?')} {loud['snr_db']:+.0f} dB" if loud.get('snr_db') is not None else loud.get('words', '?'),
+        bits = [r['id'], timestamp(r['epoch']), f'{what}{conf}',
+                w.get('words', '?') + (f", candidate surface {w['distance_m']:.1f} m (source unverified)" if w.get('distance_m') else ''),
+                f"{loud.get('words', '?')} {loud['snr_db']:+.0f} dB SNR above estimated room noise" if loud.get('snr_db') is not None else loud.get('words', '?'),
                 f"{r.get('duration_s', 0):.1f} s"]
+        if loud.get('rms_dbfs') is not None:
+            bits.append(f"recorded level {loud['rms_dbfs']:.1f} dBFS; not calibrated dB SPL")
         src = r.get('source') or {}
-        if src.get('object'):
-            bits.append(f"at spot: {src['object']}" + (f" ({src['action']})" if src.get('action') else '')
+        obj = witnessed_context(r, src.get('object'))
+        action = witnessed_context(r, src.get('action'))
+        if obj:
+            bits.append(f"at spot: {obj}" + (f" ({action})" if action else '')
                         + f" [sound/sight agree: {src.get('consistent', 'unsure')}]")
-        if (r.get('near') or {}).get('text'):
-            bits.append('near: ' + r['near']['text'])
+        near = witnessed_context(r, (r.get('near') or {}).get('text'))
+        if near:
+            bits.append('near: ' + near)
         if r.get('alerts'):
             bits.append('alert: ' + ', '.join(r['alerts']))
         sp = r.get('speech') or {}
@@ -553,32 +604,58 @@ def table(records, now=None):
     return '\n'.join(lines)
 
 
+def history_highlight(record):
+    """Event-time coordinates for history UI; never imply the pixel is correct in today's frame."""
+    where = record.get('where') or {}
+    return {'record_id': record['id'], 'time': timestamp(record['epoch']), 'epoch': record['epoch'],
+            'pixel': where.get('pixel'), 'point_m': where.get('point_m'),
+            'distance_m': where.get('distance_m'), 'quality': where.get('quality'),
+            'historical': True, 'source_verified': False}
+
+
+def _search_result(answer, matches, source):
+    return {'answer': answer, 'matches': matches, 'source': source,
+            'highlights': [history_highlight(record) for record in matches]}
+
+
+def _matches_answer(matches, now):
+    answer = phrase(matches[0], now)
+    if len(matches) > 1:
+        answer += f' ({len(matches) - 1} more match{"es" if len(matches) > 2 else ""}.)'
+    return answer
+
+
 def search(question, memory_or_records, meta=None, now=None, limit=5, max_rows=150):
     """Answer a question about past sounds with a grounded sentence.
 
     With meta (Muse Spark), the model reads a compact table of the records and picks the matching
-    ids plus a short answer; ids it invents are dropped. Without meta (or if the call fails or the
+    ids; invented ids and model-written factual claims are dropped. Without meta (or if the call fails or the
     budget is used up), a local keyword search answers. Either way the matches are rendered from
     the stored facts by phrase(), so where/when/how loud never come from the model's imagination.
     """
     now = time.time() if now is None else now
     records = memory_or_records.recent(5000) if hasattr(memory_or_records, 'recent') else list(memory_or_records)
     if not records:
-        return {'answer': 'No sounds recorded yet.', 'matches': [], 'source': 'local'}
+        return _search_result('No sounds recorded yet.', [], 'local')
     window = time_window(question, now)
-    pool = [r for r in records if window is None or window[0] <= r['epoch'] <= window[1]] or records
+    pool = [r for r in records if window is None or window[0] <= r['epoch'] <= window[1]]
+    if not pool:
+        return _search_result('No matching sound in memory for that time.', [], 'local')
     if meta is not None:
         try:
             rows = pool[-max_rows:]
             reply = meta.answer_query(question, table(rows, now),
-                                      datetime.fromtimestamp(now).strftime('%A %Y-%m-%d %H:%M:%S'))
+                                      timestamp(now))
             by_id = {r['id']: r for r in rows}
-            matches = [by_id[i] for i in reply.get('matches', []) if i in by_id][:limit]
-            answer = (reply.get('answer') or '').strip()
-            if matches or answer:
-                if not answer:
-                    answer = phrase(matches[0], now)
-                return {'answer': answer, 'matches': matches, 'source': 'muse-spark'}
+            seen, matches = set(), []
+            for record_id in reply.get('matches', []):
+                if isinstance(record_id, str) and record_id in by_id and record_id not in seen:
+                    seen.add(record_id)
+                    matches.append(by_id[record_id])
+            matches = matches[:limit]
+            if matches:
+                # Meta retrieves semantically; deterministic rendering supplies every factual claim.
+                return _search_result(_matches_answer(matches, now), matches, 'muse-spark')
         except Exception as exc:  # any model/budget problem falls back to the free local search
             fallback = f' (Muse Spark unavailable: {exc})'
         else:
@@ -587,12 +664,9 @@ def search(question, memory_or_records, meta=None, now=None, limit=5, max_rows=1
         fallback = ''
     matches = local_search(question, pool, now, limit)
     if not matches:
-        return {'answer': 'No matching sound in memory' + (' for that time.' if window else '.') + fallback,
-                'matches': [], 'source': 'local'}
-    answer = phrase(matches[0], now)
-    if len(matches) > 1:
-        answer += f' ({len(matches) - 1} more match{"es" if len(matches) > 2 else ""}.)'
-    return {'answer': answer + fallback, 'matches': matches, 'source': 'local'}
+        return _search_result('No matching sound in memory' + (' for that time.' if window else '.') + fallback,
+                              [], 'local')
+    return _search_result(_matches_answer(matches, now) + fallback, matches, 'local')
 
 
 # ---------------------------------------------------------------------------------------------

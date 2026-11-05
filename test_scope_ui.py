@@ -151,6 +151,93 @@ class Dashboard(unittest.TestCase):
         self.assertFalse(np.array_equal(on[340, 580], self.frame[340, 580]))
         self.assertGreater(np.count_nonzero(off != self.frame), 0)
 
+    def test_palettes_change_only_display_and_keep_weak_uncertainty(self):
+        view = synthetic_view('weak')
+        before = copy.deepcopy(view)
+        colors = []
+        for palette in scope_ui.HEATMAP_PALETTES:
+            with self.subTest(palette=palette):
+                out = scope_ui.render(self.frame, view, '', '', now=10,
+                                      heatmap_palette=palette, heatmap_opacity=.65)
+                camera = self.camera(out)
+                colors.append(camera[340, 580].tolist())
+                np.testing.assert_array_equal(camera[:160, :400], self.frame[:160, :400])
+                moved_spot = dict(view, spot=(10, 10))
+                alternate = scope_ui.render(self.frame, moved_spot, '', '', now=10,
+                                            heatmap_palette=palette, heatmap_opacity=.65)
+                np.testing.assert_array_equal(self.camera(alternate), camera)
+                zero = scope_ui.render(self.frame, view, '', '', now=10,
+                                       heatmap_palette=palette, heatmap_opacity=0)
+                np.testing.assert_array_equal(self.camera(zero), self.frame)
+                stale = scope_ui.render(self.frame, view, '', '', now=20,
+                                        heatmap_palette=palette, heatmap_opacity=.85)
+                np.testing.assert_array_equal(self.camera(stale), self.frame)
+        self.assertEqual(len({tuple(color) for color in colors}), len(colors))
+        np.testing.assert_array_equal(view['scores'], before['scores'])
+        self.assertEqual(view['quality'], before['quality'])
+
+    def test_palette_controls_do_not_make_flat_evidence_visible(self):
+        for palette in scope_ui.HEATMAP_PALETTES:
+            view = synthetic_view('weak')
+            view['scores'] = np.full_like(view['scores'], .2)
+            out = scope_ui.render(self.frame, view, '', '', now=10,
+                                  heatmap_palette=palette, heatmap_opacity=.85)
+            np.testing.assert_array_equal(self.camera(out), self.frame)
+
+    def test_palette_controls_reject_invalid_values(self):
+        for palette in ('unknown', None, []):
+            with self.assertRaises(ValueError):
+                scope_ui.render(self.frame, None, '', '', heatmap_palette=palette)
+        for opacity in (-.1, .86, float('nan'), float('inf'), 'bad'):
+            with self.assertRaises(ValueError):
+                scope_ui.render(self.frame, None, '', '', heatmap_opacity=opacity)
+
+    def test_search_field_preserves_camera_and_shows_focused_controls(self):
+        from unittest.mock import patch
+        for query in ('', 'ringing near the door', 'long query ' * 70):
+            with self.subTest(query=query[:30]):
+                with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+                    out = scope_ui.render(self.frame, None, '', 'Prior note', now=10,
+                                          search_text=query, diagnostics=True)
+                np.testing.assert_array_equal(self.camera(out), self.frame)
+                labels = [str(call.args[1]) for call in text.call_args_list]
+                for label in ('SEARCH SOUND HISTORY', 'ENTER', 'search', 'ESC', 'cancel', 'BACKSPACE'):
+                    self.assertIn(label, labels)
+                self.assertNotIn('Prior note', labels)
+                self.assertNotIn('DIAGNOSTICS', labels)
+                if query:
+                    self.assertTrue(any(label.endswith(' |') for label in labels))
+                else:
+                    self.assertIn('Type a sound or description...', labels)
+
+    def test_search_field_is_responsive_without_changing_camera_geometry(self):
+        for viewport in ((1280, 720), (1366, 768), (1920, 1080)):
+            ordinary = scope_ui.render(self.frame, None, '', '', now=10, viewport_size=viewport)
+            searching = scope_ui.render(self.frame, None, '', '', now=10, viewport_size=viewport,
+                                        search_text='phone ringing near the door')
+            np.testing.assert_array_equal(scope_ui.camera_rgb_crop(ordinary, self.frame.shape, viewport),
+                                          scope_ui.camera_rgb_crop(searching, self.frame.shape, viewport))
+
+    def test_history_result_empty_long_and_input_priority(self):
+        from unittest.mock import patch
+        ordinary = scope_ui.render(self.frame, None, '', '', now=10)
+        empty = scope_ui.render(self.frame, None, '', '', now=10, search_answer='')
+        np.testing.assert_array_equal(ordinary, empty)
+        for answer in ('A ring was recorded 12 seconds ago, near the door.', 'long history answer ' * 90):
+            with self.subTest(answer=answer[:30]):
+                with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+                    out = scope_ui.render(self.frame, None, '', '', now=10, search_answer=answer)
+                labels = [str(call.args[1]) for call in text.call_args_list]
+                self.assertIn('HISTORY RESULT', labels)
+                self.assertFalse(np.array_equal(self.camera(out), self.frame))
+                # Results never cover the top of the image or move its geometry.
+                np.testing.assert_array_equal(self.camera(out)[:200], self.frame[:200])
+        with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+            scope_ui.render(self.frame, None, '', '', now=10, search_text='', search_answer='Prior result')
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertIn('SEARCH SOUND HISTORY', labels)
+        self.assertNotIn('HISTORY RESULT', labels)
+
     def test_missing_and_degenerate_fields_are_safe(self):
         cases = [None, {}, {'fix': {}}, {'scores': np.zeros((5, 5))}, {'scores': np.full((5, 5), np.nan)},
                  {'scores': []}, {'off_screen': ('above', 20)}, {'scores': np.ones((3, 3)), 'support_mask': np.ones((4, 4))},

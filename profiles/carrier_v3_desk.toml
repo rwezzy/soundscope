@@ -1,26 +1,37 @@
 # The ring carrier (carrier_v3) on its tripod beside the Lite 6 on the demo desk.
-#   python arm_follow.py --mount carrier_v3_desk listen [--live]
-# Mics give a direction, not a distance: the arm assumes the sound is ~1 m from the mics
-# ([aim] assumed_distance_mm), so clap about 1 m in front of the camera.
+#   python scope.py --mount carrier_v3_desk --target-file recordings/latest_target.json
+#   python arm_target.py --mount carrier_v3_desk  (dry run by default)
+# arm_follow.py listen remains a separate mic-only mode with an ASSUMED distance.
 
 [camera]
 mount = "base"
 
-[camera.base]                  # measured on the demo desk, from the arm base centre at table level
-position_mm = [-340, 710, 165] # lens 34 cm behind the base, 71 cm to its left, 16.5 cm above the table
+[camera.base]                  # approximate user measurements, from the arm base centre at table level
+position_mm = [-380, 740, 160] # lens 38 cm behind the base, 74 cm to its left, 16 cm above the table
 yaw_deg = 0                    # faces the arm's front (the side away from its cables)
 pitch_deg = 0
 
 [array]
 mount = "facing"               # board standing, LED side toward the scene
 cable_edge = "up"              # USB edge up
-position_mm = [4, -11, 128]    # [forward, left, up] from the color lens
-front_yaw_deg = 0              # press C in scope.py --mount carrier_v3 to calibrate; it is saved here
+mirror = true                 # same physical carrier orientation as carrier_v3
+# This is the microphone centre IN THE ARM BASE FRAME, not a camera-relative offset.
+# camera position + nominal carrier offset [4, -11, 128] = [-376, 729, 288].
+# The user's board lower edge 80 mm above the lens gives about 130 mm to its centre;
+# nominal CAD 128 mm is retained so standalone and desk profiles use the same rigid geometry.
+# Forward/sideways offsets and zero yaw/pitch are estimates, not a measured calibration.
+position_mm = [-376, 729, 288]
+front_yaw_deg = 0              # C in scope.py --mount carrier_v3_desk saves yaw to THIS profile
 
-[look]                         # the arm's pose at the start, read with `arm_follow.py check` (Nov 4)
-start_joints_deg = [-89.4, -3.8, 76.5, 256.9, -82.7, -194.5]
+# Reported wall planes: about X=-500 mm behind and Y=-500 mm to the right of the base.
+# Informational only: this profile does not model collision shapes or verify any swept arm path.
+# Joint turn limits do not prove clearance from these walls, the desk, cables or the sensor stand.
+
+[look]                         # dry-run reference, read through Viam Nov 4 around 20:05 ET
+# Real runs read the current pose. This is not a command to move or return to this pose.
+start_joints_deg = [-9.409, -3.762, 76.548, 256.926, -82.704, -194.458]
 reach_mm = 231
 lateral_mm = 59
-heading_deg = 85               # the gripper faces about straight out the arm's front at this pose
+heading_deg = 85               # tool heading RELATIVE TO J1, derived from the read-only end pose
 height_mm = 475
 pitch_deg = -14

@@ -22,6 +22,7 @@ No image detection anywhere. Settings and offsets: arm_config.toml. Setup: ARM_S
 """
 import argparse
 import asyncio
+from collections import deque
 import json
 import math
 import os
@@ -399,21 +400,35 @@ class ViamArm:
                 'height_mm': float(pose.z), 'pitch_deg': math.degrees(math.asin(max(-1.0, min(1.0, pose.o_z))))}
 
     async def move(self, target):
+        """Bound the complete RPC, polling and verification, not just post-RPC polling."""
+        timeout = float(self.cfg['safety'].get('move_timeout_s', 30.0))
+        completed = False
+        try:
+            async with asyncio.timeout(timeout):
+                await self._move_checked(target)
+            completed = True
+        except asyncio.TimeoutError as exc:
+            raise SystemExit(f'A move exceeded {timeout:g} s; requesting an arm stop.') from exc
+        finally:
+            if not completed:
+                try:
+                    await asyncio.wait_for(self.stop(), timeout=2.0)
+                except (Exception, asyncio.CancelledError) as exc:
+                    # A failed stop must not hide the original move/cancellation error.
+                    print(f'Arm stop could not be confirmed: {exc}. Use the physical E-stop.')
+
+    async def _move_checked(self, target):
         from viam.components.arm import JointPositions
         s = self.cfg['safety']
         before, end_before = await self.joints(), await self.arm.get_end_position()
         started = time.monotonic()
         await self.arm.move_to_joint_positions(JointPositions(values=list(target)))
         while await self.arm.is_moving():
-            if time.monotonic() - started > 30:
-                await self.stop()
-                raise SystemExit('A move took over 30 s. Stopped the arm.')
             await asyncio.sleep(0.05)
         elapsed = time.monotonic() - started
         after = await self.joints()
         turned = max(abs(a - b) for a, b in zip(after, before))
         if turned > 3 and turned / max(elapsed, 1e-3) > 1.3 * s['speed_deg_s']:
-            await self.stop()
             raise SystemExit(f"The arm turned {turned:.0f}° in {elapsed:.1f} s, faster than "
                              f"{s['speed_deg_s']}°/s. Stopped. Check the speed settings in Viam.")
         # First real turn: make sure J1 swings the arm the way this program's base frame assumes.
@@ -422,7 +437,6 @@ class ViamArm:
                 and min(math.hypot(end_before.x, end_before.y), math.hypot(end_after.x, end_after.y)) > 50):
             swing = math.degrees(math.atan2(end_after.y, end_after.x) - math.atan2(end_before.y, end_before.x))
             if ((swing + 180) % 360 - 180) * (after[0] - before[0]) < 0:
-                await self.stop()
                 raise SystemExit('J1 swung the arm the opposite way from what this program assumes. '
                                  'Stopped; see "Base frame check" in ARM_SETUP.md.')
             self.direction_checked = True
@@ -441,6 +455,34 @@ class Follower:
         self.target, self.following, self.once = target, following, False
         self.wrist = bool(cfg['array'].get('on_arm'))
         self.memory = memory
+        self._moved_sound_ids = deque(maxlen=256)
+
+    @staticmethod
+    def _sound_key(ev):
+        if ev.get('event_id') is not None:
+            return ('event', ev['event_id'])
+        if ev.get('observed_at') is not None:
+            return ('capture', ev['observed_at'])
+        return ('synthetic', id(ev))
+
+    def _sound_rejection(self, ev, *, check_duplicate=True):
+        if ev['fix'].get('directional_ambiguous', False):
+            return 'sound direction is ambiguous; staying put'
+        if check_duplicate and self._sound_key(ev) in self._moved_sound_ids:
+            return 'already moved for this sound; waiting for fresh evidence'
+        observed = ev.get('observed_at')
+        if observed is None:
+            return None if self.arm.dry else 'sound has no capture timestamp; staying put'
+        try:
+            age = time.monotonic() - float(observed)
+        except (TypeError, ValueError):
+            return 'sound has an invalid capture timestamp; staying put'
+        if not math.isfinite(age) or age < -0.1:
+            return 'sound has an invalid capture timestamp; staying put'
+        maximum = self.cfg['safety'].get('max_sound_age_s', 1.5)
+        if age > maximum:
+            return f'sound is stale ({age:.1f} s old); waiting for fresh evidence'
+        return None
 
     def remember(self, ev):
         """Save the sound to the sound memory (direction relative to the camera on the mount)."""
@@ -483,28 +525,41 @@ class Follower:
         notes.append(f"{'within' if ok else 'out of'} reach ({radius / 1000:.1f} m from base, assumed distance)")
         return ' | ' + ', '.join(notes)
 
-    async def turn_to(self, want_j1, line, want_j5=None):
+    async def turn_to(self, want_j1, line, want_j5=None, *, sound_event=None, before_move=None):
         joints = await self.arm.joints()
         new, note = self.gate.next_joints(joints, want_j1, want_j5, now=time.monotonic())
         if new is None:
             print(f'{line} - {note}')
             return False
         tag = '  [dry run]' if self.arm.dry else ''
+        moved = False
+        single_step = sound_event is not None and self.cfg['safety'].get(
+            'single_step_per_sound', not self.arm.dry)
         while new is not None:
+            if sound_event is not None:
+                why = self._sound_rejection(sound_event, check_duplicate=not moved)
+                if why is None and before_move is not None:
+                    why = before_move()
+                if why:
+                    print(f'{line} - {why}')
+                    return moved
+                if not moved:
+                    self._moved_sound_ids.append(self._sound_key(sound_event))
             tilt = f', J5 {joints[4]:.0f}° -> {new[4]:.0f}°' if new[4] != joints[4] else ''
             print(f'{line}\n          J1 {joints[0]:.0f}° -> {new[0]:.0f}°{tilt}{note}{tag}')
             self._mute(math.inf)  # motor noise is not a sound to chase
             try:
                 await self.arm.move(new)
+                moved = True
             finally:
                 self.gate.moved(time.monotonic())
                 self._mute(self.cfg['safety']['mute_after_move_s'])
-            if not self.inbox.empty():  # something newer to handle first
+            if single_step or not self.inbox.empty():  # wait for new evidence after a diagnostic step
                 break
             joints = await self.arm.joints()
             new, note = self.gate.next_joints(joints, want_j1, want_j5, continuing=True)
             line = f'{stamp()} continuing'
-        return True
+        return moved
 
     async def on_sound(self, ev):
         fix = ev['fix']
@@ -518,7 +573,7 @@ class Follower:
         if not self.following:
             print(line + ' - not following; press Enter and say "follow"')
             return
-        why = self.gate.accept(fix)
+        why = self._sound_rejection(ev) or self.gate.accept(fix)
         if why:
             print(f'{line} - {why}')
             return
@@ -533,11 +588,15 @@ class Follower:
             if not verdict['match'] or verdict['confidence'] < 0.5:
                 print(f'{line} - not "{self.target}", staying put')
                 return
+        why = self._sound_rejection(ev)  # inference may finish after the sound stopped
+        if why:
+            print(f'{line} - {why}')
+            return
         if self.wrist:  # the mics ride with the camera: turn by the sound's angle off the view's center
             want, want_j5, yaw, pitch = self.wrist_target(fix, await self.arm.joints())
-            if await self.turn_to(want, line, want_j5) and self.once:
+            if await self.turn_to(want, line, want_j5, sound_event=ev) and self.once:
                 self.following = False
-                print('          found it; holding still. Say "follow" to keep tracking.')
+                print('          completed a turn; holding still. Say "follow" to keep tracking.')
             return
         point = aim.sound_point(fix['direction'], self.cfg)
         want = aim.j1_to_face(point, self.pointer)
@@ -547,9 +606,9 @@ class Follower:
         want_j5 = None
         if self.cfg['aim']['use_pitch']:
             want_j5 = self.gate.start[4] + self.cfg['aim']['pitch_sign'] * aim.pitch_to_face(point, self.pointer, want)
-        if await self.turn_to(want, line + self._where(point), want_j5) and self.once:
+        if await self.turn_to(want, line + self._where(point), want_j5, sound_event=ev) and self.once:
             self.following = False
-            print('          found it; holding still. Say "follow" to keep tracking.')
+            print('          completed a turn; holding still. Say "follow" to keep tracking.')
 
     async def on_voice(self, ev):
         loop = asyncio.get_running_loop()
@@ -576,14 +635,16 @@ class Follower:
 
 
 async def feed_simulated(bearings, post, gap, cfg=None):
-    """Fake sounds at bearings (+ = right): of the array's front edge, or of the camera's view on the wrist."""
-    for b in bearings:
+    """Fake camera-view bearings (+ = right), transformed for either fixed or wrist geometry."""
+    for event_id, b in enumerate(bearings, 1):
         az = math.radians(-b)
         direction = np.array([math.cos(az), math.sin(az), 0.0])
-        if cfg is not None and cfg['array'].get('on_arm'):
+        if cfg is not None:
             direction = aim.camera_to_array([math.sin(math.radians(b)), 0.0, math.cos(math.radians(b))], cfg)
-        post({'kind': 'sound', 'wav': None,
-              'fix': {'azimuth': -b % 360, 'elevation': 0.0, 'direction': direction,
+        post({'kind': 'sound', 'wav': None, 'event_id': event_id, 'observed_at': time.monotonic(),
+              'fix': {'azimuth': math.degrees(math.atan2(direction[1], direction[0])) % 360,
+                      'elevation': math.degrees(math.asin(float(np.clip(direction[2], -1, 1)))),
+                      'direction': direction,
                       'z': 50.0, 'snr_db': 10.0, 'seconds': 1.0}})
         await asyncio.sleep(gap)
     post({'kind': 'done'})

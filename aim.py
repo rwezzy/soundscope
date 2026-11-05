@@ -60,6 +60,12 @@ def load_config(path=CONFIG_FILE, profile=None):
         lo, hi = s[key]
         if not -CAPS[key] <= lo <= 0 <= hi <= CAPS[key]:
             raise SystemExit(f'arm_config.toml: safety.{key} must include 0 and stay within ±{CAPS[key]}.')
+    if 'max_sound_age_s' in s:
+        age = s['max_sound_age_s']
+        if isinstance(age, bool) or not isinstance(age, (int, float)) or not math.isfinite(age) or age <= 0:
+            raise SystemExit('arm_config.toml: safety.max_sound_age_s must be a finite number above 0.')
+    if 'single_step_per_sound' in s and not isinstance(s['single_step_per_sound'], bool):
+        raise SystemExit('arm_config.toml: safety.single_step_per_sound must be true or false.')
     if cfg['camera']['mount'] not in ('base', 'arm'):
         raise SystemExit('arm_config.toml: camera.mount must be "base" or "arm".')
     return cfg
@@ -109,7 +115,10 @@ def array_axes(cfg):
         x, z = (-up if a.get('cable_edge', 'up') == 'down' else up), ahead
     else:
         x, z = ahead, up
-    return np.column_stack([x, np.cross(z, x), z])
+    # Ring holder facing the other way: preserve the measured, clap-tested handedness.
+    # The planar array's front/back ambiguity is resolved by the configured viewing side.
+    y = np.cross(z, x)
+    return np.column_stack([x, -y if a.get('mirror') else y, z])
 
 
 def sound_point(direction, cfg, distance_mm=None):
@@ -238,10 +247,26 @@ class Gate:
 
     def accept(self, fix):
         """None if a sound fix is trustworthy enough to move for, else the reason it isn't."""
-        if fix['z'] < self.s['min_confidence_z']:
-            return f"not sure enough (z {fix['z']:.0f}, needs {self.s['min_confidence_z']})"
-        if fix['snr_db'] < self.s['min_snr_db']:
-            return f"too faint (SNR {fix['snr_db']:+.0f} dB)"
+        try:
+            z, snr = float(fix['z']), float(fix['snr_db'])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return 'invalid sound quality'
+        if not math.isfinite(z) or not math.isfinite(snr):
+            return 'non-finite sound quality'
+        if fix.get('directional_ambiguous', False):
+            return 'ambiguous sound direction'
+        if z < self.s['min_confidence_z']:
+            return f"not sure enough (z {z:.0f}, needs {self.s['min_confidence_z']})"
+        if snr < self.s['min_snr_db']:
+            return f"too faint (SNR {snr:+.0f} dB)"
+        try:
+            direction = np.asarray(fix['direction'], dtype=float)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return 'invalid sound direction'
+        if direction.shape != (3,) or not np.all(np.isfinite(direction)):
+            return 'invalid or non-finite sound direction'
+        if np.linalg.norm(direction) < 1e-9:
+            return 'empty sound direction'
         return None
 
     def _toward(self, j, current, wanted):

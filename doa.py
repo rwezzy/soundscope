@@ -185,8 +185,10 @@ class Tracker:
 
     def _add(self, X, w):
         new = self.loc.evidence(X[None], w)
-        for run, event, n in zip(self.run, self.event, new):
-            run *= self.decay
+        for index, (run, event, n) in enumerate(zip(self.run, self.event, new)):
+            # C and W sum effective weights; W2 sums their squares. Its decay
+            # must therefore be alpha^2 to preserve the running z-score variance.
+            run *= self.decay ** (2 if index == 2 else 1)
             run += n
             event += n
         self.frames += 1
