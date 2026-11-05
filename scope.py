@@ -10,8 +10,10 @@
   python scope.py --record demo.mp4          also save the annotated video
 
 Keys: V = voice command, L = last sounds, C = three-position calibration, Enter = apply,
-Esc = cancel, H = heat map, M = map colours, D = diagnostics, Space = pause,
+Esc = cancel, H = heat map, M = map colours, X = map style, [ / ] = opacity,
+? = help, D = diagnostics, Space = pause,
 T = type a history question, B = saved evidence, E = replay selected audio,
+N = name a saved sound, R = latest recorded event,
 Up/Down (or J/K) = select history, F = fullscreen, S = evidence snapshot, Q = quit.
 Voice: press V and say "find my keys", "follow the phone ringing", "stop", "show everything",
 "when did the phone ring?", "who is talking?" or "what was that?".
@@ -1053,13 +1055,17 @@ def run(args, cfg):
     shape, click = None, None
     view, latest, meta_worker, evidence_frame = None, None, None, None
     heatmap, diagnostics, paused = not args.no_heatmap, args.diagnostics, False
-    heatmap_palette = getattr(args, 'palette', 'turbo')
-    heatmap_opacity = getattr(args, 'heatmap_opacity', 0.65)
+    heatmap_palette = getattr(args, 'palette', 'amber')
+    heatmap_opacity = getattr(args, 'heatmap_opacity', 0.44)
+    heatmap_style = getattr(args, 'heatmap_style', 'smooth')
+    show_help, display_action = False, None
     pause_time, held = None, None
     viewport = initial_viewport()
     displayed_viewport = None
     displayed = None
+    displayed_recent_events = []
     search_text, search_worker = None, None
+    entry_kind, label_record_id = 'search', None
     history = HistoryController(session.evidence_store)
     history_action = None
     fullscreen = getattr(args, 'fullscreen', False)
@@ -1105,10 +1111,16 @@ def run(args, cfg):
             say(ui, f'History search unavailable: {exc}')
 
     def on_mouse(event, x, y, flags, param):
-        nonlocal click, history_action
+        nonlocal click, history_action, display_action
         if history.active and search_text is None and event == cv2.EVENT_LBUTTONDOWN:
             history_action = history.handle_click(x, y, displayed_viewport or viewport)
             return
+        if event == cv2.EVENT_LBUTTONDOWN and search_text is None and shape is not None:
+            display_action = scope_ui.control_hit_test(
+                x, y, shape, displayed_viewport or viewport,
+                recent_events=displayed_recent_events)
+            if display_action is not None or show_help:
+                return
         if cal.active and not paused and shape is not None and event == cv2.EVENT_LBUTTONDOWN:
             xy = scope_ui.canvas_to_frame(x, y, shape, viewport_size=displayed_viewport)
             if xy is not None and displayed is not None:
@@ -1270,16 +1282,19 @@ def run(args, cfg):
             if session.outline is not None and shown_view is not None and \
                     session.outline[0] == shown_view.get('record_id'):
                 shown_view = {**shown_view, 'sam_outline': session.outline[1]}
+            recent_events = list(reversed(session.memory.recent(3))) if session.memory else []
             out = draw(frame, shown_view, hunt['target'], ui['note'], session.status(hunt),
                        now=pause_time if paused else now,
                        fps=fps, depth_coverage=float(np.mean(np.isfinite(depth) & (depth > 100))),
                        heatmap=heatmap, diagnostics=diagnostics, paused=paused, calibration_active=cal.active,
                        heatmap_palette=heatmap_palette, heatmap_opacity=heatmap_opacity,
+                       heatmap_style=heatmap_style, show_help=show_help,
                        search_text=search_text,
+                       entry_kind=entry_kind,
                        search_answer=(ui['search_answer'][0] if ui.get('search_answer') and
                                       now < ui['search_answer'][1] else None),
                        viewport_size=viewport, captions=session.captions,
-                       recent_events=(list(reversed(session.memory.recent(3))) if session.memory else []),
+                       recent_events=recent_events,
                        outlines=[poly for polys, _ in session.outlines for poly in polys],
                        alert=session.alert[0] if session.alert else None)
             if history.active:
@@ -1296,14 +1311,30 @@ def run(args, cfg):
                 out = history_ui.render_history(records, history.selected, viewport_size=viewport,
                                                 search_query=history.query,
                                                 search_result_count=len(records) if history.query else None,
-                                                status=history.status, search_text=search_text)
+                                                status=history.status, search_text=search_text,
+                                                entry_kind=entry_kind)
             cv2.imshow(WINDOW, out)
+            displayed_recent_events = recent_events
             displayed_viewport = viewport
             displayed = (latest, depth, dict(k))
             if recorder:
                 recorder.write(out, now)
             raw_key = cv2.waitKeyEx(1)
             key = raw_key & 0xFF
+            if display_action is not None:
+                # Mouse controls and shortcuts use the same event paths.
+                if isinstance(display_action, tuple) and display_action[0] == 'event':
+                    open_history()
+                    for index, record in enumerate(history.events):
+                        if record.get('id') == display_action[1]:
+                            history.selected = index
+                            break
+                else:
+                    key = {'style': ord('x'), 'palette': ord('m'),
+                           'opacity_down': ord('['), 'opacity_up': ord(']'),
+                           'history': ord('b'), 'search': ord('t'),
+                           'help': ord('?')}.get(display_action, key)
+                display_action = None
             if search_text is None and history.active and raw_key in (2490368, 2621440, 65362, 65364):
                 history.next(-1 if raw_key in (2490368, 65362) else 1)
                 continue
@@ -1313,25 +1344,52 @@ def run(args, cfg):
                 search_text, action = edit_search_input(search_text, key)
                 if action == 'submit':
                     question, search_text = search_text, None
-                    say(ui, f'Searching sound history: {question}')
-                    search_worker = threading.Thread(target=ask_history, args=(question,), daemon=True)
-                    search_worker.start()
+                    if entry_kind == 'label':
+                        try:
+                            sound_memory.annotate_event(session.memory, label_record_id, question)
+                            history.status = f'Your label saved: {question}. Recognition is unchanged.'
+                            say(ui, history.status)
+                        except (ValueError, OSError) as exc:
+                            say(ui, f'Could not save label: {exc}')
+                    else:
+                        say(ui, f'Searching sound history: {question}')
+                        search_worker = threading.Thread(target=ask_history, args=(question,), daemon=True)
+                        search_worker.start()
                 elif action == 'cancel':
-                    say(ui, 'Search cancelled.')
+                    say(ui, 'Label cancelled.' if entry_kind == 'label' else 'Search cancelled.')
                 continue
             if ord('A') <= key <= ord('Z'):
                 key += ord('a') - ord('A')
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
-            if key == ord('f'):
+            if key == ord('?'):
+                history.active = False
+                show_help = not show_help
+            elif show_help and key == 27:
+                show_help = False
+            elif key == ord('f'):
                 fullscreen = not fullscreen
                 cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
             elif key == ord('b'):
+                show_help = False
                 if history.active:
                     history.active = False
                 else:
                     open_history()
+            elif key == ord('r'):
+                show_help = False
+                open_history()
+            elif key == ord('n'):
+                show_help = False
+                records = session.memory.recent(1) if session.memory else []
+                record = history.current() if history.active and history.events else (records[0] if records else None)
+                if record:
+                    label_record_id = record['id']
+                    entry_kind, search_text = 'label', ''
+                    say(ui, 'Name this saved event. Your label stays separate from AI guesses; it does not train recognition.')
+                else:
+                    say(ui, 'No saved event to name yet.')
             elif history.active and key == 27:
                 history.active = False
             elif history.active and key in (ord('j'), ord('k'), 9):
@@ -1352,9 +1410,11 @@ def run(args, cfg):
                 except queue.Full:
                     say(ui, 'Still recording the last command.')
             elif key in (ord('t'), ord('/')):
+                show_help = False
                 if search_worker is not None and search_worker.is_alive():
                     say(ui, 'Finishing the previous history search.')
                 else:
+                    entry_kind = 'search'
                     search_text = ''
                     say(ui, 'Type a question about recorded sounds; ENTER searches, ESC cancels.')
             elif key == ord('l'):
@@ -1363,6 +1423,7 @@ def run(args, cfg):
                     print('  ' + sound_memory.phrase(rec), flush=True)
                 say(ui, sound_memory.phrase(last[-1]) if last else 'No sounds in memory yet.')
             elif key == ord('c') and not paused and not history.active:
+                show_help = False
                 say(ui, cal.start(cfg))
                 if target_writer:
                     target_writer.invalidate('Calibration active')
@@ -1386,6 +1447,14 @@ def run(args, cfg):
                 choices = tuple(scope_ui.HEATMAP_PALETTES)
                 heatmap_palette = choices[(choices.index(heatmap_palette) + 1) % len(choices)]
                 say(ui, f'Heatmap colour: {heatmap_palette}. M changes colour; H hides/shows the overlay.')
+            elif key == ord('x'):
+                choices = tuple(scope_ui.HEATMAP_STYLES)
+                heatmap_style = choices[(choices.index(heatmap_style) + 1) % len(choices)]
+                say(ui, f'Display style: {heatmap_style}. Appearance only; measured location is unchanged.')
+            elif key in (ord('['), ord(']'), ord('-'), ord('+'), ord('=')):
+                delta = -0.1 if key in (ord('['), ord('-')) else 0.1
+                heatmap_opacity = round(min(.85, max(0., heatmap_opacity + delta)), 2)
+                say(ui, f'Heatmap opacity: {heatmap_opacity:.0%}. [ softer / ] stronger; this does not change detection sensitivity.')
             elif key == ord('d'):
                 diagnostics = not diagnostics
             elif key == ord(' '):
@@ -1450,9 +1519,11 @@ def main():
     p.add_argument('--seconds', type=float, help='stop after this long')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')
-    p.add_argument('--palette', choices=tuple(scope_ui.HEATMAP_PALETTES), default='turbo',
+    p.add_argument('--palette', choices=tuple(scope_ui.HEATMAP_PALETTES), default='amber',
                    help='heatmap colours (M cycles while running)')
-    p.add_argument('--heatmap-opacity', type=float, default=0.65, help='heatmap strength, 0 to 0.85')
+    p.add_argument('--heatmap-style', choices=tuple(scope_ui.HEATMAP_STYLES), default='smooth',
+                   help='heatmap presentation (X cycles while running)')
+    p.add_argument('--heatmap-opacity', type=float, default=0.44, help='heatmap strength, 0 to 0.85')
     p.add_argument('--reach', action='store_true', help="print a configured workspace check; requires camera-to-base calibration")
     p.add_argument('--env-file', help='also load keys from this .env file')
     p.add_argument('--target-file', help='export fresh depth candidates locally for arm_target.py; no motion here')

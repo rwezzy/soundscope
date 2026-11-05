@@ -14,37 +14,27 @@ import time
 
 import cv2
 import numpy as np
+from heatmap_render import blend_heatmap, HEATMAP_PALETTES, HEATMAP_STYLES, palette_lut
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:  # retain the OpenCV fallback on a minimal installation
     Image = ImageDraw = ImageFont = None
 
 
-# All colors are BGR. A restrained palette keeps camera detail readable.
-BG = (18, 15, 12)
-PANEL = (29, 25, 21)
-LINE = (57, 49, 41)
-TEXT = (239, 233, 223)
-MUTED = (154, 143, 127)
-CYAN = (220, 207, 75)
-AMBER = (91, 187, 244)
+# All colors are BGR. Color is interface hierarchy, never inferred confidence.
+BG = (0, 0, 0)
+PANEL = (17, 17, 17)
+PANEL2 = (28, 28, 28)
+LINE = (55, 55, 55)
+TEXT = (244, 244, 244)
+MUTED = (163, 163, 163)
+PINK = (178, 82, 255)
+YELLOW = (94, 229, 245)
+CYAN = PINK
+AMBER = YELLOW
 GRAY = (143, 137, 126)
 ALERT = (80, 80, 240)
 DEFAULT_EXPIRY = 1.2
-HEATMAP_PALETTES = {
-    'amber': 'Cyan / amber',
-    'turbo': 'Rainbow',
-    'inferno': 'Inferno',
-    'viridis': 'Viridis',
-    'plasma': 'Plasma',
-}
-_CV_PALETTES = {
-    'turbo': cv2.COLORMAP_TURBO,
-    'inferno': cv2.COLORMAP_INFERNO,
-    'viridis': cv2.COLORMAP_VIRIDIS,
-    'plasma': cv2.COLORMAP_PLASMA,
-}
-
 
 @dataclass(frozen=True)
 class _Layout:
@@ -71,21 +61,21 @@ def _layout(frame_shape, viewport_size=None):
             raise ValueError('viewport_size must be at least 320 x 240 pixels')
         s = min(1.25, width / 1000.0, height / 754.0)
         px = lambda value: int(round(value * s))
-        main_width = width - px(384)
-        note_y = height - px(158)
-        area_height = note_y - px(16) - px(128)
+        main_width = width - px(360)
+        note_y = height - px(138)
+        area_height = note_y - px(18) - px(108)
         factor = min(main_width / w, area_height / h)
         fitted_w, fitted_h = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
         camera = (px(24) + (main_width - fitted_w) // 2,
-                  px(128) + (area_height - fitted_h) // 2, fitted_w, fitted_h)
+                  px(108) + (area_height - fitted_h) // 2, fitted_w, fitted_h)
         return _Layout(s, main_width, width, height, camera,
-                       main_width + px(48), px(312), area_height, note_y, px(72), True)
+                       main_width + px(48), px(288), area_height, note_y, px(64), True)
     s = max(1.0, min(1.5, w / 1280.0))
     px = lambda value: int(round(value * s))
     main_width = max(w, px(520))
-    return _Layout(s, main_width, main_width + px(384), max(px(754), h + px(348)),
-                   (px(24) + (main_width - w) // 2, px(128), w, h),
-                   main_width + px(48), px(312), h, px(128) + h + px(24), px(94), False)
+    return _Layout(s, main_width, main_width + px(360), max(px(754), h + px(304)),
+                   (px(24) + (main_width - w) // 2, px(108), w, h),
+                   main_width + px(48), px(288), h, px(108) + h + px(20), px(74), False)
 
 
 def camera_rect(frame_shape, viewport_size=None):
@@ -110,6 +100,40 @@ def camera_rgb_crop(canvas, frame_shape, viewport_size=None):
     """Copy the displayed camera viewport as RGB, useful for previews and QA."""
     x, y, w, h = camera_rect(frame_shape, viewport_size)
     return cv2.cvtColor(canvas[y:y + h, x:x + w], cv2.COLOR_BGR2RGB)
+
+
+def control_rects(frame_shape, viewport_size=None):
+    """Named clickable controls; shared by drawing and mouse hit testing."""
+    layout = _layout(frame_shape, viewport_size)
+    p = lambda value: int(round(value * layout.scale))
+    sx, sw = layout.sidebar_x, layout.sidebar_width
+    return {
+        'search': (layout.width - p(347), p(24), p(126), p(32)),
+        'history': (layout.width - p(209), p(24), p(126), p(32)),
+        'help': (layout.width - p(61), p(24), p(37), p(32)),
+        'palette': (sx + p(16), p(540), sw - p(32), p(30)),
+        'style': (sx + p(16), p(580), sw - p(32), p(30)),
+        'opacity_down': (sx + sw - p(82), p(624), p(28), p(27)),
+        'opacity_up': (sx + sw - p(44), p(624), p(28), p(27)),
+    }
+
+
+def recent_event_rects(frame_shape, viewport_size=None):
+    layout = _layout(frame_shape, viewport_size)
+    p = lambda value: int(round(value * layout.scale))
+    return [(layout.sidebar_x + p(10), p(354 + i * 43),
+             layout.sidebar_width - p(20), p(39)) for i in range(3)]
+
+
+def control_hit_test(x, y, frame_shape, viewport_size=None, recent_events=()):
+    """Return a control name, ('event', id), or None; never perform an action."""
+    for name, (rx, ry, rw, rh) in control_rects(frame_shape, viewport_size).items():
+        if rx <= x < rx + rw and ry <= y < ry + rh:
+            return name
+    for record, (rx, ry, rw, rh) in zip(recent_events, recent_event_rects(frame_shape, viewport_size)):
+        if rx <= x < rx + rw and ry <= y < ry + rh and record.get('id') is not None:
+            return ('event', record['id'])
+    return None
 
 
 def _number(value, default=None):
@@ -297,27 +321,6 @@ def _support(view, shape):
     return strength, support
 
 
-@lru_cache(maxsize=40)
-def _heat_tables(weak, palette='amber', opacity=0.44):
-    """Premultiplied BGR heat and camera retention, computed at 256 levels.
-
-    OpenCV applies these tiny tables with native byte operations. Computing the
-    same color/alpha expressions on full-frame NumPy RGB arrays dominated the
-    live loop; byte blending preserves the gradient within rounding precision.
-    """
-    level = np.linspace(0, 1, 256, dtype=np.float32)
-    alpha = opacity * (0.40 / 0.44 if weak else 1.0) * level ** 1.2
-    if palette == 'amber':
-        blend = np.clip((level - 0.25) / 0.75, 0, 1)[:, None]
-        color = np.asarray(CYAN, np.float32) * (1 - blend) + np.asarray(AMBER, np.float32) * blend
-    else:
-        color = cv2.applyColorMap(np.arange(256, dtype=np.uint8).reshape(256, 1),
-                                 _CV_PALETTES[palette]).reshape(256, 3).astype(np.float32)
-    retention = np.rint((1 - alpha) * 255).astype(np.uint8)
-    contribution = np.rint(color * alpha[:, None]).astype(np.uint8).reshape(256, 1, 3)
-    return retention, contribution
-
-
 def _brackets(img, bounds, color, scale):
     x, y, w, h = bounds
     pad = int(round(7 * scale))
@@ -330,7 +333,7 @@ def _brackets(img, bounds, color, scale):
 
 
 def _camera_overlay(image, view, state, heatmap, diagnostics, scale,
-                    heatmap_palette='amber', heatmap_opacity=0.44):
+                    heatmap_palette='amber', heatmap_opacity=0.44, heatmap_style='smooth'):
     if state in ('STALE', 'LISTENING'):
         return
     color = CYAN if state == 'CANDIDATE' else AMBER
@@ -341,12 +344,8 @@ def _camera_overlay(image, view, state, heatmap, diagnostics, scale,
     # probability. User-selected opacity keeps at least 15% of the camera even
     # at a peak; lower scores preserve more of the scene. Palette is display only.
     if heatmap and strength is not None and cv2.minMaxLoc(strength)[1] > 0:
-        retention_table, heat_table = _heat_tables(state == 'WEAK', heatmap_palette, heatmap_opacity)
-        level = cv2.convertScaleAbs(strength, alpha=255)
-        retention = cv2.cvtColor(cv2.LUT(level, retention_table), cv2.COLOR_GRAY2BGR)
-        heat = cv2.applyColorMap(level, heat_table)
-        cv2.multiply(image, retention, scale=1 / 255.0, dst=image)
-        cv2.add(image, heat, dst=image)
+        blend_heatmap(image, strength, palette=heatmap_palette, style=heatmap_style,
+                      opacity=heatmap_opacity, weak=state == 'WEAK')
     # Weak or semantically rejected estimates can show evidence, never a precise
     # point, direction arrow, support boundary, or depth-object outline.
     if state not in ('CANDIDATE', 'AMBIGUOUS'):
@@ -370,9 +369,10 @@ def _camera_overlay(image, view, state, heatmap, diagnostics, scale,
         return
     contours, _ = cv2.findContours(support, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = [c for c in contours if cv2.contourArea(c) >= 4]
-    lines = image.copy()
-    cv2.drawContours(lines, contours, -1, color, max(1, int(scale)), cv2.LINE_AA)
-    cv2.addWeighted(lines, 0.7, image, 0.3, 0, dst=image)
+    if diagnostics:
+        lines = image.copy()
+        cv2.drawContours(lines, contours, -1, color, max(1, int(scale)), cv2.LINE_AA)
+        cv2.addWeighted(lines, 0.7, image, 0.3, 0, dst=image)
     # Brackets enclose the entire acoustic support, not a supposedly exact spot.
     # Broad/multiple regions retain their actual uncertainty contours.
     if state == 'CANDIDATE' and np.mean(support) < 0.35 and len(contours) == 1:
@@ -511,7 +511,8 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
            heatmap=True, diagnostics=False, paused=False, calibration_active=False,
            viewport_size=None, status=None, captions=(), outlines=(), alert=None,
            heatmap_palette='amber', heatmap_opacity=0.44, search_text=None,
-           search_answer=None, recent_events=()):
+           search_answer=None, recent_events=(), heatmap_style='smooth', show_help=False,
+           entry_kind='search'):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -532,6 +533,8 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         raise ValueError('frame must be a uint8 BGR image with three channels')
     if not isinstance(heatmap_palette, str) or heatmap_palette not in HEATMAP_PALETTES:
         raise ValueError('Unknown heatmap palette')
+    if not isinstance(heatmap_style, str) or heatmap_style not in HEATMAP_STYLES:
+        raise ValueError('Unknown heatmap style')
     heatmap_opacity = _number(heatmap_opacity)
     if heatmap_opacity is None or not 0 <= heatmap_opacity <= .85:
         raise ValueError('Heatmap opacity must be a finite number from 0 to 0.85')
@@ -547,32 +550,38 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     x, y, w, h = layout.camera
     sx, sw = layout.sidebar_x, layout.sidebar_width
 
-    # Brand and live camera status.
+    # Brand, navigation, and a calm canvas around the measured camera scene.
     for i, size in enumerate((10, 22, 32, 19, 9)):
         xx = p(26 + i * 6)
-        cv2.line(out, (xx, p(38 - size / 2)), (xx, p(38 + size / 2)), CYAN, p(2), cv2.LINE_AA)
-    _text(out, 'SoundScope', p(70), p(43), 0.84 * s, TEXT, max(1, p(2)))
-    _text(out, 'SPATIAL AUDIO / VISION', p(71), p(62), 0.32 * s, MUTED)
-    badge = 'PAUSED' if paused else 'CAMERA LIVE'
-    badge_color = AMBER if paused else CYAN
-    badge_x = layout.width - p(184)
-    _round_rect(out, (badge_x, p(24), p(160), p(32)), PANEL, p(9))
-    cv2.circle(out, (badge_x + p(14), p(40)), p(3), badge_color, -1, cv2.LINE_AA)
-    _text(out, badge, badge_x + p(26), p(45), 0.42 * s, badge_color)
-    cv2.line(out, (p(24), p(78)), (layout.width - p(24), p(78)), LINE, 1)
+        cv2.line(out, (xx, p(37 - size / 2)), (xx, p(37 + size / 2)),
+                 YELLOW if i == 2 else PINK, max(1, p(3)), cv2.LINE_AA)
+    _text(out, 'Sound', p(70), p(43), 0.85 * s, PINK, max(2, p(2)))
+    _text(out, 'Scope', p(70) + _width('Sound', .85 * s, True), p(43), .85 * s,
+          YELLOW, max(2, p(2)))
+    _text(out, 'SEE SOUND. REMEMBER WHAT HAPPENED.', p(71), p(62), 0.28 * s, MUTED)
+    controls = control_rects(frame.shape, viewport_size)
+    for name, label in (('search', 'Search  T'), ('history', 'History  B'), ('help', '?')):
+        bx, by, bw, bh = controls[name]
+        _round_rect(out, (bx, by, bw, bh), PANEL2 if name == 'search' else PANEL, p(9))
+        if name == 'search':
+            _round_rect(out, (bx, by, bw, bh), (83, 50, 95), p(9), 1)
+        _text(out, label, bx + (bw - _width(label, .38 * s, True)) // 2,
+              by + p(22), .38 * s, PINK if name == 'search' else TEXT, 2)
+    cv2.line(out, (p(24), p(73)), (layout.width - p(24), p(73)), LINE, 1)
 
     # The card includes letterboxing, while camera_rect names only actual pixels.
-    _round_rect(out, (p(16), p(92), layout.main_width + p(16), layout.camera_area_height + p(44)), PANEL, p(12))
-    _text(out, 'CAMERA FIELD', p(28), p(114), 0.38 * s, MUTED)
+    _round_rect(out, (p(16), p(82), layout.main_width + p(16), layout.camera_area_height + p(34)), PANEL, p(14))
+    cv2.circle(out, (p(31), p(97)), max(1, p(3)), YELLOW if not paused else MUTED, -1, cv2.LINE_AA)
+    _text(out, 'PAUSED FRAME' if paused else 'LIVE VIEW', p(41), p(102), .32 * s, TEXT, 2)
     mode = ('CALIBRATION' if calibration_active else 'HEATMAP OFF' if not heatmap
             else 'HEATMAP / WEAK EVIDENCE' if state == 'WEAK'
             else 'HEATMAP / RELATIVE EVIDENCE')
     mode_width = _width(mode, 0.34 * s)
-    _text(out, mode, p(24) + layout.main_width - mode_width - p(6), p(114), 0.34 * s,
+    _text(out, mode, p(24) + layout.main_width - mode_width - p(6), p(102), 0.34 * s,
           AMBER if calibration_active else MUTED)
     camera = frame.copy()
     _camera_overlay(camera, view, state, heatmap, diagnostics, s,
-                    heatmap_palette, heatmap_opacity)
+                    heatmap_palette, heatmap_opacity, heatmap_style)
     if state not in ('STALE', 'LISTENING'):
         _sam_outline(camera, view, s)
     if outlines:  # SAM outlines of sound sources, kept a few seconds after their sound
@@ -608,8 +617,10 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     note_y = layout.note_y
     _round_rect(out, (p(16), note_y, layout.main_width + p(16), layout.note_height), PANEL, p(12))
     searching = search_text is not None
-    notes_heading = 'SEARCH SOUND HISTORY' if searching else 'CALIBRATION' if calibration_active else 'FIELD NOTES'
-    _text(out, notes_heading, p(30), note_y + p(22),
+    naming = searching and entry_kind == 'label'
+    notes_heading = ('NAME SAVED SOUND' if naming else 'SEARCH SOUND HISTORY' if searching
+                     else 'CALIBRATION' if calibration_active else 'SOUND NOTES')
+    _text(out, notes_heading, p(30), note_y + p(19),
           0.34 * s, CYAN if searching else AMBER if calibration_active else MUTED)
     message = note or ('Play a sound, then click its source in the camera field.' if calibration_active
                        else 'Listening for spatial audio. Make a short, clear sound.')
@@ -621,48 +632,35 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         # Keep the insertion point visible when a query exceeds the field width.
         while query and _width(('... ' if clipped else '') + query + ' |', 0.43 * s) > available:
             query, clipped = query[1:], True
-        shown = ('... ' if clipped else '') + query + ' |' if query else 'Type a sound or description...'
-        _text(out, shown, p(30), note_y + p(45), 0.43 * s, TEXT if query else MUTED)
-        _text(out, 'ENTER search  /  ESC cancel  /  searches recorded events',
-              p(30), note_y + p(63), 0.28 * s, MUTED)
+        shown = ('... ' if clipped else '') + query + ' |' if query else ('Name this saved event...' if naming else 'Type a sound or description...')
+        _text(out, shown, p(30), note_y + p(40), 0.43 * s, TEXT if query else MUTED)
+        _text(out, 'ENTER saves your label / ESC cancels / does not train recognition' if naming else
+              'ENTER search  /  ESC cancel  /  searches recorded events',
+              p(30), note_y + p(57), 0.28 * s, MUTED)
     else:
         for i, line in enumerate(_wrap(message, layout.main_width - p(28), 0.43 * s, 2)):
-            _text(out, line, p(30), note_y + p(45 + i * 20), 0.43 * s, TEXT)
+            _text(out, line, p(30), note_y + p(40 + i * 18), 0.40 * s, TEXT)
 
     def card(top, height, title):
-        _round_rect(out, (sx, p(top), sw, p(height)), PANEL, p(12))
-        _text(out, title, sx + p(18), p(top + 24), 0.34 * s, MUTED)
+        _round_rect(out, (sx, p(top), sw, p(height)), PANEL, p(14))
+        _text(out, title, sx + p(16), p(top + 24), 0.32 * s, MUTED, 2)
 
-    card(92, 140, 'LOCALIZATION')
-    cv2.circle(out, (sx + p(21), p(144)), p(4), color, -1, cv2.LINE_AA)
-    _text(out, state, sx + p(34), p(152), 0.68 * s, color, max(1, p(2)))
-    for i, line in enumerate(_wrap(reason, sw - p(112), 0.4 * s, 3)):
-        _text(out, line, sx + p(18), p(179 + i * 18), 0.4 * s, MUTED)
+    # One spatial card, not a wall of scores. The candidate qualifier stays explicit.
+    card(82, 224, 'LOCALIZATION')
+    cv2.circle(out, (sx + p(20), p(131)), max(1, p(3)), color, -1, cv2.LINE_AA)
+    _text(out, state, sx + p(31), p(136), .48 * s, color, 2)
     bearing = _view_bearing(view) if state == 'CANDIDATE' else None
-    _bearing_dial(out, (sx + sw - p(49), p(184)), p(30), bearing, color)
-    _text(out, 'camera bearing', sx + sw - p(90), p(225), .22 * s, MUTED)
-
-    card(246, 174, 'ACOUSTIC EVIDENCE')
+    direction = ('Straight ahead' if abs(bearing) < 10 else
+                 'To the right' if bearing > 0 else 'To the left') if bearing is not None else 'Listening...' if state == 'LISTENING' else 'Direction unresolved'
+    _text(out, _fit(direction, sw - p(99), .54 * s, True), sx + p(16), p(164), .54 * s, TEXT, 2)
+    for i, line in enumerate(_wrap(reason, sw - p(105), .32 * s, 2)):
+        _text(out, line, sx + p(16), p(185 + i * 16), .32 * s, MUTED)
+    _bearing_dial(out, (sx + sw - p(49), p(169)), p(31), bearing, color)
+    _text(out, 'camera bearing', sx + sw - p(84), p(214), .22 * s, MUTED)
+    cv2.line(out, (sx + p(16), p(224)), (sx + sw - p(16), p(224)), LINE, 1)
+    _text(out, 'CANDIDATE SURFACE RANGE', sx + p(16), p(244), .27 * s, MUTED, 2)
     fix = view.get('fix') or {}
     fresh = state not in ('STALE', 'LISTENING')
-    coherence = _number(fix.get('coherence')) if fresh else None
-    snr = _number(fix.get('snr_db')) if fresh else None
-    fraction = _number((view.get('quality') or {}).get('support_fraction')) if fresh else None
-    coverage = ('broad' if fraction >= 0.35 else 'distributed' if fraction >= 0.12 else 'localized') if fraction is not None else '--'
-    if state == 'WEAK':
-        coverage = 'unresolved'
-    rows = [('Pair coherence', f'{coherence:.2f}' if coherence is not None else '--'),
-            ('Signal / noise', f'{snr:+.1f} dB' if snr is not None else '--'), ('Field support', coverage)]
-    for i, (label, value) in enumerate(rows):
-        yy = p(295 + i * 25)
-        _text(out, label, sx + p(18), yy, 0.4 * s, MUTED)
-        text_width = _width(value, 0.44 * s)
-        _text(out, value, sx + sw - p(18) - text_width, yy, 0.44 * s, TEXT)
-    if fresh:
-        _sparkline(out, view, (sx + p(18), p(369), sw - p(36), p(23)), color)
-    _text(out, f'{heatmap_palette.upper()} / relative agreement', sx + p(18), p(407), 0.29 * s, MUTED)
-
-    card(434, 126, 'CANDIDATE SURFACE RANGE')
     distance = None
     if fresh and state in ('CANDIDATE', 'AMBIGUOUS') and view.get('measured') and not view.get('off_screen'):
         try:
@@ -671,32 +669,66 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
                 distance = float(np.linalg.norm(point))
         except (ValueError, TypeError):
             pass
-    _text(out, f'{distance:.2f} m' if distance is not None else '--', sx + p(18), p(501), 0.92 * s,
-          TEXT if distance is not None else MUTED, max(1, p(2)))
-    _text(out, 'Visible surface, not source distance.', sx + p(18), p(528), 0.37 * s, MUTED)
-    _text(out, 'Depth unavailable' if fresh and distance is None else 'Sound-source depth is unconfirmed.',
-          sx + p(18), p(546), 0.31 * s, MUTED)
+    _text(out, f'{distance:.2f} m' if distance is not None else '--', sx + p(16), p(276), .70 * s,
+          YELLOW if distance is not None else MUTED, 2)
+    _text(out, 'Visible surface, not source distance.', sx + p(16), p(295), .28 * s, MUTED)
 
+    card(320, 170, 'RECENT EVENTS / B TO BROWSE')
     if recent_events:
-        card(574, 88, 'RECENT EVENTS / B TO BROWSE')
-        for i, event in enumerate(tuple(recent_events)[:3]):
+        for event, rect in zip(tuple(recent_events)[:3], recent_event_rects(frame.shape, viewport_size)):
+            ex, ey, ew, eh = rect
+            _round_rect(out, rect, PANEL2, p(8))
             sound = event.get('sound') or {}
-            title = sound.get('label') or sound.get('local_label') or ('Speech' if event.get('speech') else '')
-            title = title or (event.get('acoustic') or {}).get('character') or 'Unidentified sound'
+            source = str(sound.get('source') or '').lower()
+            annotation = event.get('annotation') or {}
+            if annotation.get('source') == 'user' and annotation.get('label'):
+                title, origin = annotation['label'], 'Your label'
+            elif sound.get('label'):
+                title = sound['label']
+                origin = 'User label' if source in ('user', 'manual', 'user-provided') else 'AI estimate'
+            elif sound.get('local_label'):
+                title, origin = sound['local_label'], 'Your example'
+            elif event.get('speech'):
+                title, origin = 'Speech', 'Transcript'
+            else:
+                title = (event.get('acoustic') or {}).get('character') or 'Unidentified sound'
+                origin = 'Acoustic pattern'
+            origin_w = _width(origin, .23 * s)
+            _text(out, _fit(title, ew - origin_w - p(26), .38 * s, True), ex + p(9), ey + p(17), .38 * s, TEXT, 2)
+            _text(out, origin, ex + ew - origin_w - p(9), ey + p(17), .23 * s, PINK)
             stamp = str(event.get('time') or '')
             stamp = stamp[11:19] if len(stamp) >= 19 else '--:--:--'
-            _text(out, stamp, sx + p(18), p(615 + i * 18), .29 * s, MUTED)
-            _text(out, _fit(title, sw - p(110), .32 * s), sx + p(90), p(615 + i * 18), .32 * s, TEXT)
+            _text(out, stamp, ex + p(9), ey + p(32), .27 * s, MUTED)
+            where = str((event.get('where') or {}).get('words') or 'saved event')
+            _text(out, _fit(where, ew - p(88), .26 * s), ex + p(80), ey + p(32), .26 * s, MUTED)
     else:
-        card(574, 88, 'EVENT AGE')
-        _text(out, f'{age:.1f} s' if age is not None else '--', sx + p(18), p(628), 0.64 * s,
-              AMBER if state == 'STALE' else TEXT)
-        phase = 'expired' if state == 'STALE' else 'completed sound' if view.get('final') else 'live estimate' if view else 'awaiting audio'
-        _text(out, phase, sx + p(120), p(626), 0.35 * s, MUTED)
-        bar_x, bar_w = sx + p(18), sw - p(36)
-        cv2.line(out, (bar_x, p(646)), (bar_x + bar_w, p(646)), LINE, max(1, p(2)))
-        if age is not None and age <= expiry and expiry > 0:
-            cv2.line(out, (bar_x, p(646)), (bar_x + int(bar_w * (1 - age / expiry)), p(646)), color, max(1, p(2)))
+        _text(out, 'Your sound history starts here.', sx + p(16), p(374), .37 * s, TEXT)
+        _text(out, 'Make a sound, then inspect its evidence.', sx + p(16), p(398), .29 * s, MUTED)
+        if age is not None:
+            _text(out, f'Last estimate: {age:.1f} s ago', sx + p(16), p(448), .30 * s, MUTED)
+        else:
+            _text(out, 'No recorded events supplied.', sx + p(16), p(448), .30 * s, MUTED)
+
+    card(504, 158, 'HEATMAP APPEARANCE')
+    button_labels = {'palette': ('Palette', HEATMAP_PALETTES[heatmap_palette]),
+                     'style': ('Style', HEATMAP_STYLES[heatmap_style])}
+    for name, (label, value) in button_labels.items():
+        bx, by, bw, bh = controls[name]
+        _round_rect(out, (bx, by, bw, bh), PANEL2, p(7))
+        _text(out, label, bx + p(9), by + p(20), .30 * s, MUTED)
+        _text(out, _fit(value, bw - p(126 if name == 'palette' else 83), .32 * s, True),
+              bx + p(72), by + p(20), .32 * s, TEXT, 2)
+        if name == 'palette':
+            swatch = cv2.resize(palette_lut(heatmap_palette).reshape(1, 256, 3),
+                                (max(1, p(31)), max(1, p(8))))
+            gx, gy = bx + bw - p(41), by + p(12)
+            out[gy:gy + swatch.shape[0], gx:gx + swatch.shape[1]] = swatch
+    _text(out, 'Opacity', sx + p(16), p(642), .31 * s, MUTED)
+    _text(out, f'{heatmap_opacity:.2f}', sx + p(87), p(643), .36 * s, YELLOW, 2)
+    for name, label in (('opacity_down', '-'), ('opacity_up', '+')):
+        bx, by, bw, bh = controls[name]
+        _round_rect(out, (bx, by, bw, bh), PANEL2, p(7))
+        _text(out, label, bx + (bw - _width(label, .45 * s)) // 2, by + p(21), .45 * s, TEXT)
 
     # Target verification is descriptive; it never becomes a localization score.
     lower_y = layout.height - p(67) if layout.compact else max(note_y + p(94), p(662)) + p(22)
@@ -714,19 +746,19 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
 
     footer_y = layout.height - p(56)
     cv2.line(out, (p(24), footer_y), (layout.width - p(24), footer_y), LINE, 1)
-    hints = ([('ENTER', 'search'), ('ESC', 'cancel'), ('BACKSPACE', 'delete')]
+    hints = ([('ENTER', 'save label' if naming else 'search'), ('ESC', 'cancel'), ('BACKSPACE', 'delete')]
              if searching else
              [('ENTER', 'apply'), ('ESC', 'cancel'), ('C', 'restart'), ('H', 'heatmap'), ('S', 'snapshot'), ('Q', 'quit')]
              if calibration_active else
-             [('V', 'voice'), ('T', 'search'), ('B', 'history'), ('L', 'last sounds'), ('C', 'calibrate'), ('H', 'heatmap'), ('M', 'colors'), ('D', 'diagnostics'),
-              ('SPACE', 'resume' if paused else 'pause'), ('S', 'snapshot'), ('F', 'full screen'), ('Q', 'quit')])
+             [('V', 'voice'), ('T', 'search'), ('B', 'history'), ('C', 'calibrate'), ('H', 'heatmap'),
+              ('M', 'palette'), ('X', 'style'), ('[ ]', 'opacity'), ('?', 'help'), ('F', 'full screen'), ('Q', 'quit')])
     cursor = p(24)
     for key, action in hints:
         key_width = _width(key, 0.32 * s) + p(12)
         if cursor + key_width + p(7) + _width(action, 0.34 * s) > layout.width - p(24):
             break
-        _round_rect(out, (cursor, footer_y + p(17), key_width, p(22)), PANEL, p(4))
-        _text(out, key, cursor + p(6), footer_y + p(32), 0.32 * s, TEXT)
+        _round_rect(out, (cursor, footer_y + p(17), key_width, p(22)), PANEL2, p(5))
+        _text(out, key, cursor + p(6), footer_y + p(32), 0.32 * s, YELLOW)
         cursor += key_width + p(7)
         _text(out, action, cursor, footer_y + p(32), 0.34 * s, MUTED)
         cursor += _width(action, 0.34 * s) + p(19)
@@ -735,15 +767,48 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         _text(out, f'{max(0, fps_value):.1f} FPS', layout.width - p(98), footer_y + p(32), 0.36 * s, MUTED)
 
     if diagnostics and not searching:
+        coherence = _number(fix.get('coherence')) if fresh else None
+        snr = _number(fix.get('snr_db')) if fresh else None
         z = _number(fix.get('z')) if fresh else None
         peak = _number((view.get('quality') or {}).get('peak_score')) if fresh else None
         depth = _number(depth_coverage)
-        info = ['DIAGNOSTICS', f'peak z {z:.1f}' if z is not None else 'peak z --',
+        info = ['DIAGNOSTICS', f'SNR {snr:+.1f} dB' if snr is not None else 'SNR --',
+                f'coherence {coherence:.2f}' if coherence is not None else 'coherence --',
+                f'peak z {z:.1f}' if z is not None else 'peak z --',
                 f'SRP {peak:.3f}' if peak is not None else 'SRP --',
                 f'depth coverage {np.clip(depth, 0, 1) * 100:.0f}%' if depth is not None else 'depth coverage --',
                 'gray outline = depth surface']
         heading_width = _width(notes_heading, 0.34 * s)
         diag_x = p(30) + heading_width + p(24) if layout.compact else p(30)
-        diag_y = note_y + p(22 if layout.compact else 81)
+        diag_y = note_y + p(19) if layout.compact else note_y - p(5)
         _text(out, _fit('  |  '.join(info), layout.main_width - diag_x, 0.29 * s), diag_x, diag_y, 0.29 * s, CYAN)
+    if show_help:
+        shade = np.full_like(out, BG)
+        cv2.addWeighted(out, .32, shade, .68, 0, dst=out)
+        help_w = min(layout.width - p(48), p(670))
+        help_h = min(layout.height - p(40), p(550))
+        hx, hy = (layout.width - help_w) // 2, (layout.height - help_h) // 2
+        _round_rect(out, (hx, hy, help_w, help_h), PANEL, p(18))
+        _round_rect(out, (hx, hy, help_w, help_h), (85, 51, 99), p(18), 1)
+        _text(out, 'Make sense of a sound.', hx + p(28), hy + p(46), .72 * s, TEXT, 2)
+        _text(out, 'Live evidence, a searchable history, and the original recording.',
+              hx + p(28), hy + p(72), .34 * s, MUTED)
+        help_rows = [
+            ('T  /  Search', 'Ask about sounds already recorded.'),
+            ('B  /  R', 'Browse history / open the latest saved event.'),
+            ('V  /  Voice', 'Speak a command; enabled AI features use credits.'),
+            ('M  /  X  /  [ ]', 'Palette, heatmap style, and opacity.'),
+            ('C', 'Collect calibration points; Enter applies the fit.'),
+            ('H  /  D', 'Show heatmap / measured diagnostics.'),
+            ('N  /  E', 'Name a saved event / replay its available audio.'),
+            ('SPACE  /  S', 'Pause display / save a diagnostic snapshot.'),
+            ('F  /  Q', 'Fullscreen / finish and save cleanly.'),
+        ]
+        for i, (keys, description) in enumerate(help_rows):
+            ry = hy + p(110 + i * 40)
+            _text(out, keys, hx + p(28), ry, .36 * s, YELLOW, 2)
+            _text(out, _fit(description, help_w - p(215), .34 * s), hx + p(190), ry, .34 * s, TEXT)
+        _text(out, 'The map shows acoustic agreement, not a verified object identity.',
+              hx + p(28), hy + help_h - p(58), .31 * s, MUTED)
+        _text(out, '? to close help', hx + p(28), hy + help_h - p(28), .35 * s, PINK, 2)
     return out

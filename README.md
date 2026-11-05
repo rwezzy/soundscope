@@ -184,6 +184,23 @@ Re-check current left/centre/right behavior on the assembled rig before presenti
 The repository's automated tests cover software behavior and synthetic/recorded cases; they do not
 prove general room-scale localization or sound classification accuracy.
 
+## Live display controls
+
+The default dashboard uses neutral black/charcoal with small pink and yellow accents, and the
+original smooth cyan-to-amber heatmap at 44% opacity.
+Click the appearance controls or use **X** to cycle smooth, bands, contours and spotlight;
+**M** changes palette and **[ / ]** lowers/raises opacity. These controls change presentation,
+not sound sensitivity or source coordinates. Weak estimates use faint diffuse shading rather
+than precise-looking contours. Broad or multiple regions remain unresolved.
+
+Click a recent-event card or press **B** for its recorded image/audio. **R** opens the newest
+saved event. **N** lets you name a saved event: this is stored as **Your label**, separately
+from the AI estimate, and becomes searchable. It does not train recognition or label future
+sounds automatically. **T** searches, **E** replays selected audio, and **?** shows help.
+
+The original comparison version remains separate; the display update preserves the newer
+audio capture, budget controls and saved-evidence safeguards.
+
 ## Files
 
 | File | Purpose |

@@ -71,6 +71,9 @@ def hit_test(x, y, viewport_size=(1280, 720), event_count=0, selected=0):
 
 
 def _label(record):
+    annotation = _dict(record.get('annotation'))
+    if annotation.get('label'):
+        return str(annotation['label']), 'Your label / not an AI identification'
     sound, speech, acoustic = (_dict(record.get(k)) for k in ('sound', 'speech', 'acoustic'))
     if sound.get('label'):
         return str(sound['label']), 'Model interpretation / unverified'
@@ -133,7 +136,8 @@ def recorded_marker(record, image_shape):
 
 
 def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
-                   search_query='', search_result_count=None, status='', search_text=None):
+                   search_query='', search_result_count=None, status='', search_text=None,
+                   entry_kind='search'):
     """Render a recorded-events browser; ``now`` is UNIX wall time, not monotonic.
 
     Supply newest-first record dictionaries. Optional ``evidence_image`` is the
@@ -166,7 +170,7 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
     for index, rect in layout['rows']:
         record = events[index]
         active = index == layout['selected']
-        _round_rect(out, rect, (44, 39, 28) if active else PANEL, p(9))
+        _round_rect(out, rect, (32, 32, 32) if active else PANEL, p(9))
         if active:
             _round_rect(out, rect, CYAN, p(9), 1)
         rx, ry, rw, rh = rect
@@ -266,16 +270,18 @@ def render_history(events, selected=0, *, viewport_size=(1280, 720), now=None,
         # scene or record metadata. Caller owns input, submission and API use.
         _round_rect(out, box(416, 350, 808, 100), PANEL, p(9))
         _round_rect(out, box(416, 350, 808, 100), CYAN, p(9), 1)
-        text('SEARCH SOUND HISTORY', 432, 375, .33, CYAN)
+        text('NAME SAVED SOUND' if entry_kind == 'label' else 'SEARCH SOUND HISTORY', 432, 375, .33, CYAN)
         query_text = _clean(search_text)
         clipped = False
         while query_text and _width(('... ' if clipped else '') + query_text + ' |', .52 * s) > p(768):
             query_text, clipped = query_text[1:], True
-        shown = ('... ' if clipped else '') + query_text + ' |' if query_text else 'Type a sound or description...'
+        shown = ('... ' if clipped else '') + query_text + ' |' if query_text else ('Your name for this event...' if entry_kind == 'label' else 'Type a sound or description...')
         text(shown, 432, 407, .52, TEXT if query_text else MUTED)
-        text('ENTER search / ESC cancel / searches recorded events', 432, 433, .32, MUTED)
+        text('ENTER saves your label / ESC cancels / does not train recognition' if entry_kind == 'label'
+             else 'ENTER search / ESC cancel / searches recorded events', 432, 433, .32, MUTED)
     cv2.line(out, pt(24, 685), pt(1256, 685), LINE, 1)
-    text('ENTER search    ESC cancel    BACKSPACE delete' if search_text is not None else
-         'UP / DOWN select    B or ESC live    E replay    A analyze    T search', 24, 707, .33, MUTED)
+    text(('ENTER save    ESC cancel    BACKSPACE delete' if entry_kind == 'label' else
+          'ENTER search    ESC cancel    BACKSPACE delete') if search_text is not None else
+         'UP / DOWN select    B live    E replay    A analyze    N name    T search', 24, 707, .33, MUTED)
     text('LOCAL EVENT EVIDENCE', 1088, 707, .28, MUTED)
     return out

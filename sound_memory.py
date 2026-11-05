@@ -374,6 +374,40 @@ class Memory:
         return items[-n:]
 
 
+def _clean_annotation(label):
+    if not isinstance(label, str):
+        raise ValueError('Enter a text label for this event.')
+    label = ' '.join(''.join(c for c in label if c.isprintable() or c.isspace()).split())
+    if not label:
+        raise ValueError('The event label cannot be empty.')
+    if len(label) > 120:
+        raise ValueError('Keep the event label to 120 characters or fewer.')
+    return label
+
+
+def _annotation_label(record):
+    annotation = record.get('annotation') or {}
+    if not isinstance(annotation, dict) or annotation.get('source') != 'user':
+        return ''
+    try:
+        return _clean_annotation(annotation.get('label'))
+    except ValueError:
+        return ''
+
+
+def annotate_event(memory, rid, label):
+    """Name one saved event locally, without changing evidence or teaching a recognizer.
+
+    The append-only patch is explicitly user-provided. It never replaces model
+    labels, location measurements, timestamps, recordings, or reference examples.
+    """
+    clean = _clean_annotation(label)
+    record = memory.update(rid, {'annotation': {'label': clean, 'source': 'user'}})
+    if record is None:
+        raise ValueError('That event is no longer available in this sound memory.')
+    return record
+
+
 def _json_default(value):
     if isinstance(value, np.generic):
         return value.item()
@@ -408,6 +442,9 @@ def ago(epoch, now):
 
 
 def what_it_was(record):
+    annotation = _annotation_label(record)
+    if annotation:
+        return f'a sound you labelled {json.dumps(annotation, ensure_ascii=False)}'
     s = record.get('sound') or {}
     if s.get('label'):
         sure = s.get('confidence') or 0
@@ -530,7 +567,9 @@ def record_text(record):
     """Everything searchable about a record, lowercase."""
     s, sp, near = record.get('sound') or {}, record.get('speech') or {}, record.get('near') or {}
     src = record.get('source') or {}
-    bits = [s.get('label'), s.get('description'), s.get('local_label'), (record.get('acoustic') or {}).get('character'),
+    annotation = _annotation_label(record)
+    bits = [('user label: ' + json.dumps(annotation, ensure_ascii=False)) if annotation else '',
+            s.get('label'), s.get('description'), s.get('local_label'), (record.get('acoustic') or {}).get('character'),
             sp.get('text'), sp.get('speaker'), witnessed_context(record, near.get('text')), (record.get('where') or {}).get('words'),
             (record.get('loudness') or {}).get('words'), witnessed_context(record, src.get('object')),
             witnessed_context(record, src.get('action')), witnessed_context(record, src.get('summary')),
@@ -572,9 +611,10 @@ def local_search(question, records, now=None, limit=5):
     scored = []
     for r in pool:
         sound = r.get('sound') or {}
+        annotation_tokens = {_stem(t) for t in _tokens(_annotation_label(r))}
         labels = ' '.join(str(sound.get(k) or '') for k in ('label', 'local_label', 'description'))
         label_tokens = {_stem(t) for t in _tokens(labels)}
-        if phone_specific and not label_tokens & phone_words:
+        if phone_specific and not (label_tokens | annotation_tokens) & phone_words:
             continue  # a generic tonal sound or someone saying "phone" is not a phone ringing
         have = {_stem(t) for t in _tokens(record_text(r))}
         overlap = len(want & have)
@@ -582,7 +622,8 @@ def local_search(question, records, now=None, limit=5):
             continue
         recency = math.exp(-(now - r['epoch']) / 3600)
         loud = 'loud' in want and (r.get('loudness') or {}).get('snr_db') or 0
-        scored.append((overlap + 3 * len(exact_want & label_tokens) + 0.3 * recency + 0.01 * loud, r))
+        scored.append((overlap + 3 * len(exact_want & label_tokens) + 4 * len(exact_want & annotation_tokens)
+                       + 0.3 * recency + 0.01 * loud, r))
     if not want:  # "what happened in the last 5 minutes": everything in the window, newest first
         scored = [(r['epoch'], r) for r in pool]
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -602,6 +643,9 @@ def table(records, now=None):
                 w.get('words', '?') + (f", candidate surface {w['distance_m']:.1f} m (source unverified)" if w.get('distance_m') else ''),
                 f"{loud.get('words', '?')} {loud['snr_db']:+.0f} dB SNR above estimated room noise" if loud.get('snr_db') is not None else loud.get('words', '?'),
                 f"{r.get('duration_s', 0):.1f} s"]
+        annotation = _annotation_label(r)
+        if annotation:
+            bits.insert(2, 'user label: ' + json.dumps(annotation, ensure_ascii=False))
         if loud.get('rms_dbfs') is not None:
             bits.append(f"recorded level {loud['rms_dbfs']:.1f} dBFS; not calibrated dB SPL")
         src = r.get('source') or {}
