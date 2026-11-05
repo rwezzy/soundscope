@@ -19,5 +19,6 @@ pitch_deg = 0                  # tripod tilted? put the angle here (- = down)
 [array]
 mount = "facing"               # board standing, LED side toward the scene
 cable_edge = "up"              # USB edge up
+mirror = true                  # board sits LED side backward: left/right swapped (clap test, Nov 4)
 position_mm = [4, -11, 128]    # [forward, left, up] from the color lens
 front_yaw_deg = 0              # press C in scope.py --mount carrier_v3 to calibrate; it is saved here

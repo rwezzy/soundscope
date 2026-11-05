@@ -101,6 +101,8 @@ def array_axes(cfg):
     mount "flat": lying down, LEDs up, cable edge toward front_yaw_deg.
     mount "facing": standing up, LEDs facing front_yaw_deg, cable edge pointing up
     (or down, with cable_edge = "down", as in the printed rig).
+    mirror = true: the board sits LED side backward, so its left and right are swapped; sounds are still
+    taken to be in front (a flat array cannot tell front from back). Found with claps, Nov 4.
     """
     a = cfg['array']
     yaw = math.radians(a['front_yaw_deg'])
@@ -109,7 +111,8 @@ def array_axes(cfg):
         x, z = (-up if a.get('cable_edge', 'up') == 'down' else up), ahead
     else:
         x, z = ahead, up
-    return np.column_stack([x, np.cross(z, x), z])
+    y = np.cross(z, x)
+    return np.column_stack([x, -y if a.get('mirror') else y, z])
 
 
 def sound_point(direction, cfg, distance_mm=None):

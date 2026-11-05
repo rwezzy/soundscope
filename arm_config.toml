@@ -10,10 +10,10 @@
 [safety]
 # Master switch. The arm only moves when this is true AND you run with --live AND type MOVE.
 live = false
-speed_deg_s = 15               # joint speed, sent to the arm before any move (code refuses > 30)
-accel_deg_s2 = 60              # joint acceleration (code refuses > 200)
+speed_deg_s = 30               # joint speed, sent to the arm before any move (code refuses > 30)
+accel_deg_s2 = 120             # joint acceleration (code refuses > 200)
 collision_sensitivity = 4      # Viam arm attribute: 0 = off .. 5 = stops with the least force
-max_step_deg = 30              # biggest single turn; longer turns happen in steps (cap 45)
+max_step_deg = 45              # biggest single turn; longer turns happen in steps (cap 45)
 deadband_deg = 6               # ignore aim changes smaller than this
 min_interval_s = 1.5           # minimum time between new turns
 yaw_window_deg = [-45, 80]     # J1 may only turn this far either side of where it started (cap 170).

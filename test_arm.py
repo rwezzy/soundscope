@@ -68,12 +68,20 @@ class Geometry(unittest.TestCase):
         self.assertTrue(any('fingertips' in w for w in aim.warnings(cfg)))
 
 
+class MountAxes(unittest.TestCase):
+    def test_mirrored_board_swaps_left_and_right_only(self):
+        board = {'mount': 'facing', 'cable_edge': 'up', 'front_yaw_deg': 0}
+        plain = aim.array_axes(cfg_with(array=board)) @ np.array([0.3, 0.5, 0.81])
+        mirrored = aim.array_axes(cfg_with(array={**board, 'mirror': True})) @ np.array([0.3, 0.5, 0.81])
+        np.testing.assert_allclose(mirrored, plain * [1, -1, 1])  # ahead and up unchanged
+
+
 class Safety(unittest.TestCase):
     def gate(self, start=(0, 0, 90, 0, 90, 0), **safety):
         return aim.Gate(cfg_with(safety=safety), start)
 
     def test_big_turns_are_split_into_capped_steps(self):
-        g = self.gate(yaw_window_deg=[-90, 90])
+        g = self.gate(yaw_window_deg=[-90, 90], max_step_deg=30)
         new, note = g.next_joints([0, 0, 90, 0, 90, 0], 80, now=10)
         self.assertEqual(new[0], 30)
         self.assertIn('50° more', note)
@@ -118,7 +126,7 @@ class Safety(unittest.TestCase):
             self.gate(start=(500, 0, 90, 0, 90, 0))
 
     def test_config_caps_cannot_be_exceeded(self):
-        text = aim.CONFIG_FILE.read_text().replace('speed_deg_s = 15', 'speed_deg_s = 90')
+        text = aim.CONFIG_FILE.read_text().replace(f"speed_deg_s = {CFG['safety']['speed_deg_s']}", 'speed_deg_s = 90')
         with mock.patch('builtins.open', mock.mock_open(read_data=text.encode())):
             with self.assertRaises(SystemExit):
                 aim.load_config()
@@ -241,7 +249,8 @@ class LiveArmSafety(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_slows_the_arm_first(self):
         fake = FakeArm()
         await self.arm(fake).prepare()
-        self.assertEqual(fake.commands, [{'set_speed': 15.0, 'set_acceleration': 60.0}])
+        self.assertEqual(fake.commands, [{'set_speed': float(CFG['safety']['speed_deg_s']),
+                                          'set_acceleration': float(CFG['safety']['accel_deg_s2'])}])
 
     async def test_normal_speed_move_passes(self):
         fake = FakeArm(deg_per_s=15)
