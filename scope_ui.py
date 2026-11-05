@@ -582,10 +582,10 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     camera = frame.copy()
     _camera_overlay(camera, view, state, heatmap, diagnostics, s,
                     heatmap_palette, heatmap_opacity, heatmap_style)
-    if state not in ('STALE', 'LISTENING'):
+    if state == 'CANDIDATE':
         _sam_outline(camera, view, s)
-    if outlines:  # SAM outlines of sound sources, kept a few seconds after their sound
-        _sam_outline(camera, {'sam_outline': outlines}, s)
+    # Retained polygons belong to past events. Without object tracking, painting
+    # them on this frame would imply a current source lock after evidence expires.
     _captions(camera, captions, frame.shape[1] / 1280.0 * 1.4)
     if alert:
         _alert_banner(camera, alert)

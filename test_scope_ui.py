@@ -379,6 +379,19 @@ class Dashboard(unittest.TestCase):
                                                           self.frame.shape, viewport, events), ('event', record['id']))
             self.assertIsNone(scope_ui.control_hit_test(-10, -10, self.frame.shape, viewport, events))
 
+    def test_live_outlines_require_current_candidate_evidence(self):
+        from unittest.mock import patch
+        polygon = [[100, 100], [200, 100], [200, 200], [100, 200]]
+        for state in ('weak', 'ambiguous', 'candidate', 'stale', 'listening'):
+            view = None if state == 'listening' else synthetic_view(
+                state='candidate' if state == 'stale' else state,
+                age=2.0 if state == 'stale' else .25)
+            if view is not None:
+                view['sam_outline'] = [polygon]
+            with patch.object(scope_ui, '_sam_outline') as outline:
+                scope_ui.render(self.frame, view, '', '', now=10, outlines=[polygon])
+            self.assertEqual(outline.call_count, 1 if state == 'candidate' else 0)
+
     def test_recent_event_labels_keep_provenance_and_user_annotation(self):
         from unittest.mock import patch
         events = [
