@@ -22,7 +22,7 @@ Use the actual path to your existing `.env` if it is elsewhere. Do not put a key
 or show the file in the recording. Each launch creates a separate history without deleting earlier
 takes. The key file is read locally; its contents are not copied.
 
-The Meta take sets an **estimated $0.20 session limit and $1 daily limit**. Free rehearsal sets both
+The Meta take sets an **estimated $0.10 session limit and $1 daily limit**. Free rehearsal sets both
 to zero. Pending requests reserve part of that allowance; the estimate is not a guaranteed provider
 billing cap. If credits are exhausted, demonstrate local localization and existing evidence rather
 than increasing the cap during a take.
@@ -72,6 +72,12 @@ make a new honest attempt. An optional SAM outline or voice query is useful only
 in the take; the evidence-backed history is the central demonstration.
 
 ## Controls during the take
+
+If recorded sound is unclear, close the viewer and run `python audio_check.py --seconds 900`.
+Press Space, keep quiet for two seconds, then play the test sound for ten seconds. Press **1**
+to replay one selected raw microphone and **2** for the old unaligned channel average. Both
+use the same playback gain. The six-channel original and diagnostics stay in the ignored
+`recordings/audio_checks/` folder; this check makes no API calls.
 
 - **F:** fullscreen. **M:** palette. **H:** heatmap visibility.
 - **T:** type a history question; Enter submits, Esc cancels. With Meta disabled, retrieval is local.

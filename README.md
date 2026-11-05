@@ -142,6 +142,10 @@ bypassing that automatic peak filter while retaining the spending limits and its
   room noise. Echoes, narrow tones, multiple sources and weak sounds can produce broad or wrong peaks.
 - **Distance:** depth of a visible candidate surface. It is not an independent acoustic range measurement.
 - **Loudness:** estimated signal-to-noise ratio or recorded dBFS. This rig is not calibrated in dB SPL.
+- **Saved audio:** one healthy raw microphone channel per event, with the selected channel and
+  input levels recorded in its metadata. Averaging unaligned microphones can cancel parts of a tone;
+  all four channels still feed direction estimation. Replay is peak-normalized, so replay volume
+  does not represent the original physical loudness.
 - **Labels and nearby objects:** model or reference-example interpretations, with their confidence and provenance.
 - **Alerts:** model matches require at least +6 dB estimated SNR and 0.75 reported confidence, or
   0.65 confidence at +20 dB or louder. The same watched alert is suppressed for 20 seconds. These

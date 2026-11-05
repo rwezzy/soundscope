@@ -74,8 +74,11 @@ The recording guide and launch commands are in [DEMO_VIDEO.md](DEMO_VIDEO.md).
 
 ## Review before submitting
 
-- The current copy has **not yet completed its paid live Meta rehearsal**. Verify the features shown
-  in the final take before adding statements about successful live model behavior.
+- The live rehearsal verified saved-image history, audio replay, a Meta transcript and a search
+  response. Single-microphone replay was reported clearer than the old channel average. A song
+  used as a ringtone was classified as speaking; this did not establish ringtone recognition.
+  Simple ringtone classification and a positive ringtone-history search remain unverified.
+  Verify those features in the final take before claiming them.
 - Report any accuracy measurements with their actual test conditions. Do not present archived
   measurements as a benchmark for the current sensor assembly.
 - Keep the standalone system as the demonstrated scope. Autonomous robotic pickup and reliable

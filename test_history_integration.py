@@ -46,12 +46,16 @@ class EvidenceRoundTrip(unittest.TestCase):
                        'snr_db': 15., 'seconds': .5, 'coherence': .3}
                 view = {'spot': (80, 60), 'point': np.array([0., 0., 1.]), 'measured': True,
                         'quality': {'state': 'candidate'}}
+                capture = {'method': 'single_raw_microphone', 'selected_device_channel': 2,
+                           'channel_indexing': 'zero_based'}
                 rec = session.record({'kind': 'sound', 'fix': fix, 'event_id': 1, 'wav': wav,
+                                      'audio_capture': capture,
                                       'observed_at': now, 'onset_at': now - .5, 'clip_end_at': now},
                                      view, frame, frame_at=now)
                 self.assertIsNotNone(rec)
                 session.close()  # flush disk writer before reading
                 saved = session.memory.get(rec['id'])
+                self.assertEqual(saved['audio_capture'], capture)
                 self.assertTrue(saved['evidence']['scene_valid'])
                 self.assertIsNone(session.meta)
                 session.memory.update(rec['id'], {'sound': {'label': 'phone ringing', 'confidence': .9}})

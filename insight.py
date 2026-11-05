@@ -132,6 +132,28 @@ class Enricher(threading.Thread):
         """Never blocks the caller; when full, the oldest waiting task is dropped."""
         self.tasks.put(task)
 
+    def automatic_audio_eligible(self, record):
+        """Pure spend-policy check using the raw input peak, never normalised WAV samples.
+
+        This recording-level heuristic is gain dependent and is not a dB SPL
+        threshold. No request flag can override this automatic-only predicate.
+        """
+        try:
+            raw_peak = (record.get('loudness') or {}).get('peak_dbfs')
+            peak = float(raw_peak)
+            return (not isinstance(raw_peak, bool) and math.isfinite(peak)
+                    and peak >= self.auto_meta_min_peak_dbfs)
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return False
+
+    def automatic_media_eligible(self, record):
+        """Pure preflight for preparing automatic crops, face blur and JPEGs.
+
+        Use before expensive image preparation; the worker repeats these checks
+        before spending. Explicit historical requests use their separate path.
+        """
+        return self.automatic_audio_eligible(record) and usable_visual_evidence(record)
+
     def start(self):
         super().start()
         for _ in range(self.workers - 1):
@@ -152,15 +174,27 @@ class Enricher(threading.Thread):
             finally:
                 if task.get('explicit') is True:
                     self.on_result(task['record']['id'], 'analysis_status',
+                                   task.get('_analysis_status') or
                                    'Saved-event analysis finished. Review the available label or transcript; '
                                    'unclear evidence may remain unlabelled.')
 
     # -- steps -----------------------------------------------------------------------------------
 
-    def _meta_ok(self, step, needs=None):
+    def _meta_ok(self, step, needs=None, on_block=None):
         needs = needs or (step,)
-        return (self.meta is not None and all(n in self.features for n in needs) and self.exhausted is None
-                and self.limits[step].allow())
+        if self.meta is None:
+            reason = 'Meta is not configured.'
+        elif not all(n in self.features for n in needs):
+            reason = f'The {" + ".join(needs)} feature is not enabled.'
+        elif self.exhausted is not None:
+            reason = f'The estimated budget is paused: {self.exhausted}'
+        elif not self.limits[step].allow():
+            reason = f'The {step} rate limit is active; wait before requesting this event again.'
+        else:
+            return True
+        if on_block is not None:
+            on_block(reason)
+        return False
 
     def _alerts(self, rid, record, items, how, confidence=None, label=None):
         """Raise alerts for watched sounds, only when they are clearly audible and reasonably sure.
@@ -205,6 +239,12 @@ class Enricher(threading.Thread):
         # A backlog formed (many sounds at once): old sounds keep their free label only.
         now = time.time()
         explicit = task.get('explicit') is True
+
+        def manual_notice(message):
+            message = 'Saved-event analysis: ' + message
+            task['_analysis_status'] = message
+            self.on_result(rid, 'notice', message)
+
         # User-requested historical analysis has a fresh request time, while the
         # original event timestamp remains untouched. Queued requests still expire.
         request_at = task.get('requested_at') if explicit else record.get('epoch', now)
@@ -227,21 +267,12 @@ class Enricher(threading.Thread):
                 if similarity >= 0.9:
                     self._alerts(rid, record, [w for w in watch if _same_sound(w, label)], 'your example')
         if stale:
+            if explicit:
+                manual_notice('request expired or its request time is invalid; press A again.')
             return
 
-        if not explicit:
-            # Use the raw, unnormalised input peak. WAV clips used by models are
-            # normalised, so neither their samples nor acoustic-profile peaks can
-            # substitute for this measurement.
-            try:
-                raw_peak = (record.get('loudness') or {}).get('peak_dbfs')
-                peak = float(raw_peak)
-                audible_recording = (not isinstance(raw_peak, bool) and math.isfinite(peak)
-                                     and peak >= self.auto_meta_min_peak_dbfs)
-            except (TypeError, ValueError, OverflowError):
-                audible_recording = False
-            if not audible_recording:
-                return  # free matching and local memory remain available
+        if not explicit and not self.automatic_audio_eligible(record):
+            return  # free matching and local memory remain available
 
         visual = usable_visual_evidence(record)
 
@@ -279,7 +310,7 @@ class Enricher(threading.Thread):
                 person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
                 if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
                     task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
-        if (wav and strong and not speech_like and not checked and (not trusted_local or watch)
+        if (not explicit and wav and strong and not speech_like and not checked and (not trusted_local or watch)
                 and self._meta_ok('identify')):
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
             if reply:
@@ -293,11 +324,19 @@ class Enricher(threading.Thread):
         # Listening for a name: also transcribe longer sounds that did not look like speech (a snap or
         # a door at the start can hide a sentence; live, Nov 4). A caption costs about $0.0003.
         long_enough = self.listen_for_names and record.get('duration_s', 0) >= 1.0
-        if (speechy or long_enough) and self._meta_ok('captions'):
+        captioned = False
+        if (speechy or long_enough or (explicit and speech_like and wav)) and self._meta_ok(
+                'captions', on_block=manual_notice if explicit else None):
             speech_wav = task.get('speech_wav') or wav
             reply = self._call(rid, self.meta.transcribe_turns, speech_wav) if speech_wav else None
-            if reply and reply['turns']:
-                turns = reply['turns']
+            turns = (reply.get('turns') or []) if reply else []
+            if explicit:
+                # An empty ASR response is not evidence that a speech-like ring
+                # was speech. Keep the fallback bounded to one audio label call.
+                turns = [turn for turn in turns if isinstance(turn, dict)
+                         and isinstance(turn.get('text'), str) and turn['text'].strip()]
+            if turns:
+                captioned = True
                 azimuths = turn_directions(turns, task.get('track') or [], task.get('clip_end_at', 0.0),
                                            task.get('clip_seconds', 0.0))
                 fallback = (record.get('where') or {}).get('azimuth_deg')
@@ -311,6 +350,31 @@ class Enricher(threading.Thread):
                          'sound': {'label': 'speech', 'category': 'speech', 'confidence': 0.9,
                                    'source': 'muse-voice-transcribe'}}
                 self._update(rid, patch, 'captions', out)
+
+        if explicit:
+            if checked:
+                task['_analysis_status'] = 'Saved-event analysis finished: sound label and scene context updated.'
+            elif captioned:
+                task['_analysis_status'] = 'Saved-event analysis finished: transcript updated.'
+            elif not wav:
+                manual_notice('no saved audio is available to analyze.')
+            elif self._meta_ok('identify', on_block=manual_notice):
+                # A deliberate request can inspect weak/local-matched evidence.
+                # This path is audio-only: it never relaxes the visual/source gates.
+                reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
+                if reply and isinstance(reply.get('label'), str) and reply['label'].strip():
+                    self._update(rid, {'sound': {'label': reply['label'], 'category': reply['category'],
+                                               'description': reply['description'],
+                                               'confidence': round(reply['confidence'], 2),
+                                               'source': 'muse-spark'}}, 'identify')
+                    self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
+                                 reply['label'])
+                    task['_analysis_status'] = 'Saved-event analysis finished: audio-only sound label updated.'
+                elif self.exhausted is not None:
+                    manual_notice(f'the estimated budget is paused: {self.exhausted}')
+                else:
+                    manual_notice('the audio-label request returned no usable label or failed; '
+                                  'the saved recording is still available.')
 
         # Context alone only when the combined source check is not in use (no double spending), and
         # never for speech: the caption says enough, and the crop would show the person talking.
@@ -360,7 +424,11 @@ def usable_visual_evidence(record):
     make_record only writes point_m/distance_m/candidate_surface for measured
     valid depth. A model's label or confidence cannot satisfy this gate.
     """
+    if not isinstance(record, dict):
+        return False
     where = record.get('where') or {}
+    if not isinstance(where, dict):
+        return False
     if (where.get('quality') != 'candidate' or where.get('on_screen') is not True or
             where.get('distance_kind') != 'candidate_surface'):
         return False

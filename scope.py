@@ -820,6 +820,8 @@ class Session:
             started = time.time() - (time.monotonic() - onset) if onset else None  # wall clock of the onset
             rec = sound_memory.make_record(fix, direction, profile=profile, view=view, level=report.get('level'),
                                            mode=self.mode, now=started)
+            if report.get('audio_capture'):
+                rec['audio_capture'] = report['audio_capture']
             if self.memory is not None:
                 self.memory.add(rec)
                 if self.evidence_writer is not None and wav and frame is not None:
@@ -844,7 +846,8 @@ class Session:
                         'clip_end_at': report.get('clip_end_at', report.get('observed_at', 0.0)),
                         'clip_seconds': report.get('clip_seconds', 0.0)}
                 pixel = rec['where']['pixel']
-                if pixel is not None and frame is not None and 'context' in self.features:
+                media_ok = self.enricher.automatic_media_eligible(rec)
+                if media_ok and pixel is not None and frame is not None and 'context' in self.features:
                     relief = depth_relief_jpeg(depth, pixel) if depth is not None and is_dark(frame, pixel) else None
                     if relief is not None:  # night: shapes from the depth camera instead of a black crop
                         task.update(crop_jpeg=relief, crop_kind='depth')
@@ -853,7 +856,7 @@ class Session:
                         before, scale = self.frame_before(report.get('onset_at', report.get('observed_at', 0.0)) - 0.25)
                         if before is not None:  # same spot, just before the sound began: what changed there?
                             task['crop_before'] = crop_jpeg(before, (pixel[0] * scale, pixel[1] * scale))
-                if pixel is not None and frame is not None and 'outline' in self.features and \
+                if media_ok and pixel is not None and frame is not None and 'outline' in self.features and \
                         (outline or ('context' in self.features and 'crop_kind' not in task)):
                     # The whole picture rides along so SAM can outline the object when sound and sight
                     # agree (or right away for a found target). Not in night mode: nothing to outline.

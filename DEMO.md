@@ -62,6 +62,6 @@ alarm guarantee. Avoid making an emergency-detection claim in the pitch.
 - **Missing camera:** microphone-only terminal mode remains available, but it has no saved scene or depth.
 - **No saved media:** show the metadata as such; do not claim a captured clip or frame that is absent.
 
-For the Meta-enabled take, `demo.ps1` sets estimated limits of $0.20 per session and $1 per day.
+For the Meta-enabled take, `demo.ps1` sets estimated limits of $0.10 per session and $1 per day.
 These are application estimates, not an exact provider billing cap. `--private` means no camera-image
 uploads; enabled labeling/transcription may still send spectrogram images or speech audio.

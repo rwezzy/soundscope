@@ -14,7 +14,7 @@ $env:META_SESSION_LIMIT_USD = '0'
 $env:META_DAILY_LIMIT_USD = '0'
 $launchArgs = @('-B', 'scope.py', '--mount', 'carrier_v3', '--palette', 'turbo', '--heatmap-opacity', '0.65')
 if ($UseMeta) {
-    $env:META_SESSION_LIMIT_USD = '0.20'
+    $env:META_SESSION_LIMIT_USD = '0.10'
     $env:META_DAILY_LIMIT_USD = '1.00'
     $launchArgs += '--meta'
 }

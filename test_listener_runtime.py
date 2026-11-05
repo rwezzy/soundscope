@@ -221,6 +221,23 @@ class ListenerRuntime(unittest.TestCase):
         self.wait_until(lambda: len(self.events) == 2)
         self.assertNotEqual(self.events[0]['event_id'], self.events[1]['event_id'])
 
+    def test_final_wav_ends_at_finalized_hop_not_callback_end(self):
+        from sound_memory import wav_samples
+        listener = self.start(updates=True)
+        block = np.concatenate([self.block(1), self.block(0), self.block(2)])
+        callback_end = 10.0 + len(block) / FS
+        with mock.patch.object(listener, '_capture_time', return_value=callback_end):
+            listener._capture(block, len(block), None, None)
+        self.wait_until(lambda: any(ev['kind'] == 'sound' for ev in self.events))
+        event = next(ev for ev in self.events if ev['kind'] == 'sound')
+        self.assertEqual(len(wav_samples(event['wav'])), 2 * HOP)
+        self.assertAlmostEqual(event['clip_end_at'], callback_end - HOP / FS)
+        self.assertAlmostEqual(event['clip_start_at'], 10.0)
+        self.assertAlmostEqual(event['clip_seconds'], 2 * HOP / FS)
+        self.assertEqual(event['level']['peak_dbfs'], 0.0)  # the following value-2 audio was excluded
+        self.assertTrue(event['audio_capture']['head_truncated'])
+        self.assertEqual(event['audio_capture']['method'], 'single_raw_microphone')
+
     def test_stop_releases_voice_recording_wait(self):
         listener = self.start()
         result = []

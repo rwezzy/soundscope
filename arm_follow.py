@@ -101,6 +101,74 @@ def sound_level(x):
     return {'rms_dbfs': to_db(power.max()), 'peak_dbfs': to_db(np.abs(x).max() ** 2)}
 
 
+def select_event_audio(clip, chans):
+    """Select one intact raw microphone for replay/classification, without averaging.
+
+    Input samples are normalised device floats (samples, device channels). An
+    unaligned channel mean can cancel a tone. Keep all four channels for DOA;
+    choose one channel for this entire recording, never switch within a clip.
+
+    Prefer finite, non-silent, unclipped channels. If at least three channels
+    remain, exclude an AC-RMS outlier over 12 dB above their median, then choose
+    the strongest remaining channel. Equal levels favour the lower device index.
+    All-clipped/all-silent inputs use a flagged fallback; no samples are invented.
+    """
+    data = np.asarray(clip)
+    channels = list(chans)
+    if data.ndim != 2 or not len(data) or not channels:
+        raise ValueError('Event audio needs samples and at least one raw microphone channel.')
+    if (any(isinstance(c, bool) or not isinstance(c, (int, np.integer)) or c < 0 or c >= data.shape[1]
+            for c in channels) or len(set(channels)) != len(channels)):
+        raise ValueError('Raw microphone channels must be unique, valid zero-based device indices.')
+    channels = [int(c) for c in channels]
+    raw = np.asarray(data[:, channels], dtype=float)
+    finite = np.isfinite(raw).all(axis=0)
+    rms = np.full(len(channels), np.nan)
+    ac_rms, peaks, clipped = rms.copy(), rms.copy(), rms.copy()
+    for index in np.flatnonzero(finite):
+        samples = raw[:, index]
+        rms[index] = np.sqrt(np.mean(samples * samples))
+        ac_rms[index] = np.sqrt(np.mean((samples - samples.mean()) ** 2))
+        peaks[index] = np.max(np.abs(samples))
+        clipped[index] = np.mean(np.abs(samples) >= 0.999)
+    available = list(np.flatnonzero(finite))
+    if not available:
+        raise ValueError('Every raw microphone channel contains nonfinite samples.')
+    active = [i for i in available if ac_rms[i] > 1e-9]
+    fallback = None
+    if not active:
+        active, fallback = available, 'no_ac_signal'
+    unclipped = [i for i in active if clipped[i] == 0]
+    if unclipped:
+        candidates = unclipped
+    else:
+        least_clipped = min(clipped[i] for i in active)
+        candidates = [i for i in active if clipped[i] == least_clipped]
+        fallback = 'all_active_channels_clipped'
+    outliers = []
+    if len(candidates) >= 3:
+        median = float(np.median(ac_rms[candidates]))
+        if median > 1e-9:
+            outliers = [i for i in candidates if ac_rms[i] > median * 10 ** (12 / 20)]
+            candidates = [i for i in candidates if i not in outliers]
+    strongest = max(ac_rms[i] for i in candidates)
+    tied = [i for i in candidates if ac_rms[i] >= strongest * (1 - 1e-6)]
+    selected = min(tied, key=lambda i: channels[i])
+    numbers = lambda values: [float(v) if math.isfinite(v) else None for v in values]
+    metadata = {
+        'method': 'single_raw_microphone',
+        'selection': 'strongest_ac_rms_after_clipping_and_outlier_checks',
+        'selected_device_channel': channels[selected], 'channel_indexing': 'zero_based',
+        'device_channels': channels, 'per_channel_rms': numbers(rms),
+        'per_channel_ac_rms': numbers(ac_rms), 'per_channel_peak': numbers(peaks),
+        'per_channel_clipped_fraction': numbers(clipped),
+        'nonfinite_channels': [channels[i] for i in range(len(channels)) if not finite[i]],
+        'rms_outlier_channels': [channels[i] for i in outliers],
+        'fallback': fallback,
+    }
+    return data[:, channels[selected]].copy(), metadata
+
+
 class Listener(threading.Thread):
     """Bounded mic worker. Sound times are monotonic capture times, never queue-arrival times.
 
@@ -221,7 +289,7 @@ class Listener(threading.Thread):
             tracker = Tracker(loc, threshold_db=self.threshold_db)
             frame, pending = np.zeros((N_FFT, len(self.chans))), np.zeros((0, len(self.chans)))
             previous_sequence = -1
-            event_id, active_event, observed_at, onset_at = 0, None, None, None
+            event_id, active_event, observed_at, onset_at, onset_sample = 0, None, None, None, None
             with sd.InputStream(device=self.dev, channels=CHANNELS, samplerate=FS, dtype='float32',
                                 callback=self._capture):
                 self.ready.set()
@@ -242,13 +310,14 @@ class Listener(threading.Thread):
                         frame.fill(0)
                         pending = pending[:0]
                         self.pos = 0  # the retained WAV must not bridge missing audio either
-                        active_event, observed_at, onset_at = None, None, None
+                        active_event, observed_at, onset_at, onset_sample = None, None, None, None
                     previous_sequence = sequence
                     self._keep(block)
                     pending = np.concatenate([pending, block[:, self.chans]])
                     while len(pending) >= HOP and not self.stop_event.is_set():
                         frame = np.concatenate([frame[HOP:], pending[:HOP]])
                         pending = pending[HOP:]
+                        frame_end_sample = self.pos - len(pending)
                         was_quiet = tracker.quiet >= tracker.gap
                         out = tracker.push(loc.stft(frame)[0])
                         if tracker.quiet == 0:  # Tracker adds evidence only on active frames
@@ -256,25 +325,32 @@ class Listener(threading.Thread):
                             if active_event is None or was_quiet:
                                 event_id += 1
                                 active_event, onset_at = event_id, observed_at
+                                onset_sample = frame_end_sample
                         ended = bool(out and out[0] == 'end')
                         if not (out and out[1]) or observed_at is None or time.monotonic() < self.mute_until:
                             if ended:
-                                active_event, observed_at, onset_at = None, None, None
+                                active_event, observed_at, onset_at, onset_sample = None, None, None, None
                             continue
                         event = {'kind': 'sound' if ended else 'update', 'fix': out[1],
                                  'event_id': active_event, 'observed_at': observed_at,
                                  'onset_at': onset_at, 'emitted_at': time.monotonic()}
                         if ended:
-                            clip = self._recent(min(out[1]['seconds'] + 0.9, 6.0))  # the sound + its quiet tail
-                            raw = clip[:, self.chans].mean(axis=1)
-                            event['wav'] = wav_bytes(raw)
-                            event['level'] = sound_level(raw)          # before wav_bytes normalizes it
-                            event['speech_wav'] = wav_bytes(clip[:, ASR_CHANNEL])
-                            event['clip_end_at'] = captured_at         # capture time of the clip's last sample
+                            clip, timing = self._event_clip(onset_sample, frame_end_sample, captured_at)
+                            timing['detected_onset_at'] = onset_at
+                            event['audio_capture'] = timing
+                            event['wav'], event['speech_wav'] = None, None
+                            if len(clip):
+                                raw, capture = select_event_audio(clip, self.chans)
+                                event['audio_capture'] = {**capture, **timing}
+                                event['wav'] = wav_bytes(raw)
+                                event['level'] = sound_level(raw)      # before wav_bytes normalizes it
+                                event['speech_wav'] = wav_bytes(clip[:, ASR_CHANNEL])
+                            event['clip_start_at'] = timing['clip_start_at']
+                            event['clip_end_at'] = timing['clip_end_at']  # exclusive sample boundary, not later callback audio
                             event['clip_seconds'] = len(clip) / FS
                             event['emitted_at'] = time.monotonic()
                             self.post(event)
-                            active_event, observed_at, onset_at = None, None, None
+                            active_event, observed_at, onset_at, onset_sample = None, None, None, None
                         elif self.updates:  # running estimate while the sound is still playing
                             self.post(event)
         except _ListenerStopped:
@@ -307,6 +383,47 @@ class Listener(threading.Thread):
     def _recent(self, seconds):
         n = min(int(seconds * FS), self.pos, len(self.buf))
         return self.buf[(self.pos - n + np.arange(n)) % len(self.buf)]
+
+    def _event_clip(self, onset_sample, end_sample, buffer_end_at, pre_roll_s=0.4):
+        """Retained samples from detector onset minus pre-roll to a finalized HOP.
+
+        _keep() already retained the whole callback, so end_sample may precede
+        self.pos. Absolute sample indices preserve gaps between pulses and avoid
+        attaching subsequent callback samples to this event. Times are capture
+        estimates at sample boundaries, not an audio/video synchronization claim.
+        """
+        if (not isinstance(onset_sample, (int, np.integer)) or
+                not isinstance(end_sample, (int, np.integer)) or
+                not 0 <= onset_sample <= end_sample or
+                not math.isfinite(buffer_end_at) or not math.isfinite(pre_roll_s) or pre_roll_s < 0):
+            raise ValueError('Event clip needs ordered sample boundaries and finite capture timing.')
+        requested_start = int(onset_sample) - int(round(pre_roll_s * FS))
+        requested_end = int(end_sample)
+        oldest = max(0, self.pos - len(self.buf))
+        start = max(oldest, requested_start)
+        end = min(self.pos, requested_end)
+        available = end > start
+        if available:
+            clip = self.buf[np.arange(start, end) % len(self.buf)].copy()
+            start_at = float(buffer_end_at - (self.pos - start) / FS)
+            end_at = float(buffer_end_at - (self.pos - end) / FS)
+        else:
+            clip = self.buf[:0].copy()
+            start_at = end_at = None
+        return clip, {
+            'clip_start_at': start_at, 'clip_end_at': end_at,
+            'clip_seconds': len(clip) / FS, 'sample_rate': FS,
+            'timestamp_clock': 'monotonic_capture_estimate',
+            'requested_clip_start_at': float(buffer_end_at - (self.pos - requested_start) / FS),
+            'requested_clip_end_at': float(buffer_end_at - (self.pos - requested_end) / FS),
+            'pre_roll_s': float(pre_roll_s),
+            'head_truncated': requested_start < oldest,
+            'tail_truncated': requested_end > self.pos,
+            'truncated': requested_start < oldest or requested_end > self.pos or not available,
+            'detected_onset_retained': bool(available and start <= onset_sample < end),
+            'saved_audio_available': bool(available),
+            'unavailable_reason': None if available else 'Event samples are no longer in the bounded audio buffer.',
+        }
 
     def record_command(self, seconds=4.0):
         """Record a spoken command from the speech channel; sounds are ignored meanwhile."""
