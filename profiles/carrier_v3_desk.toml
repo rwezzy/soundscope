@@ -1,0 +1,26 @@
+# The ring carrier (carrier_v3) on its tripod beside the Lite 6 on the demo desk.
+#   python arm_follow.py --mount carrier_v3_desk listen [--live]
+# Mics give a direction, not a distance: the arm assumes the sound is ~1 m from the mics
+# ([aim] assumed_distance_mm), so clap about 1 m in front of the camera.
+
+[camera]
+mount = "base"
+
+[camera.base]                  # measured on the demo desk, from the arm base centre at table level
+position_mm = [-340, 710, 165] # lens 34 cm behind the base, 71 cm to its left, 16.5 cm above the table
+yaw_deg = 0                    # faces the arm's front (the side away from its cables)
+pitch_deg = 0
+
+[array]
+mount = "facing"               # board standing, LED side toward the scene
+cable_edge = "up"              # USB edge up
+position_mm = [4, -11, 128]    # [forward, left, up] from the color lens
+front_yaw_deg = 0              # press C in scope.py --mount carrier_v3 to calibrate; it is saved here
+
+[look]                         # the arm's pose at the start, read with `arm_follow.py check` (Nov 4)
+start_joints_deg = [-89.4, -3.8, 76.5, 256.9, -82.7, -194.5]
+reach_mm = 231
+lateral_mm = 59
+heading_deg = 85               # the gripper faces about straight out the arm's front at this pose
+height_mm = 475
+pitch_deg = -14
