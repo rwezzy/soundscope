@@ -1,6 +1,7 @@
 param(
     [switch]$UseMeta,
     [switch]$Record,
+    [switch]$Fullscreen,
     [string]$EnvFile = '',
     [int]$Seconds = 0
 )
@@ -18,6 +19,7 @@ if ($UseMeta) {
     $launchArgs += '--meta'
 }
 if ($EnvFile) { $launchArgs += @('--env-file', $EnvFile) }
+if ($Fullscreen) { $launchArgs += '--fullscreen' }
 if ($Seconds -gt 0) { $launchArgs += @('--seconds', "$Seconds") }
 if ($Record) {
     $videoDir = Join-Path $PSScriptRoot 'recordings\demo'
@@ -27,7 +29,7 @@ if ($Record) {
     Write-Host "Silent screen video: $outputVideo"
 }
 Write-Host 'Standalone only. No arm connection.'
-Write-Host 'M: map colours. T: type a history question. V: voice command (Meta). Q: finish.'
+Write-Host 'M: colours. B: event history. E: replay saved audio. T: search. F: fullscreen. V: voice. Q: finish.'
 Write-Host "This take's sound history: $env:SOUNDSCOPE_MEMORY"
 $python = (Get-Command python -ErrorAction Stop).Source
 & $python @launchArgs

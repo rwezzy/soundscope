@@ -238,6 +238,46 @@ class Dashboard(unittest.TestCase):
         self.assertIn('SEARCH SOUND HISTORY', labels)
         self.assertNotIn('HISTORY RESULT', labels)
 
+    def test_captions_never_overlap_after_screen_edge_clamping(self):
+        from unittest.mock import patch
+        image = np.zeros((360, 640, 3), np.uint8)
+        captions = [{'text': f'Saved caption {i}', 'pixel': (320 + i * 4, 20), 'kind': 'speech'} for i in range(12)]
+        with patch.object(scope_ui, '_round_rect', wraps=scope_ui._round_rect) as draw:
+            scope_ui._captions(image, captions, 1.0)
+        boxes = [call.args[1] for call in draw.call_args_list]
+        self.assertGreater(len(boxes), 1)
+        for i, (x, y, w, h) in enumerate(boxes):
+            self.assertGreaterEqual(y, 0)
+            self.assertLessEqual(y + h, image.shape[0])
+            for bx, by, bw, bh in boxes[i + 1:]:
+                self.assertFalse(x < bx + bw and bx < x + w and y < by + bh and by < y + h)
+
+    def test_recent_events_are_real_input_and_preserve_camera(self):
+        from unittest.mock import patch
+        events = [{'time': '2026-11-04T22:01:02-05:00', 'sound': {'label': 'Ringing'}}]
+        with patch.object(scope_ui, '_text', wraps=scope_ui._text) as text:
+            result = scope_ui.render(self.frame, None, '', '', now=10, recent_events=events)
+        labels = [str(call.args[1]) for call in text.call_args_list]
+        self.assertIn('RECENT EVENTS / B TO BROWSE', labels)
+        self.assertIn('22:01:02', labels)
+        self.assertIn('Ringing', labels)
+        np.testing.assert_array_equal(self.camera(result), self.frame)
+
+    def test_bearing_dial_withholds_arrow_for_weak_ambiguous_and_expired_views(self):
+        from unittest.mock import patch
+        for state, age in (('weak', .1), ('ambiguous', .1), ('candidate', 10)):
+            with patch.object(scope_ui, '_bearing_dial', wraps=scope_ui._bearing_dial) as draw:
+                scope_ui.render(self.frame, synthetic_view(state, age=age), '', '', now=10)
+            self.assertIsNone(draw.call_args.args[3])
+        with patch.object(scope_ui, '_bearing_dial', wraps=scope_ui._bearing_dial) as draw:
+            scope_ui.render(self.frame, self.view, '', '', now=10)
+        self.assertAlmostEqual(draw.call_args.args[3], np.degrees(np.arctan2(.12, 1.14)))
+
+    def test_bearing_rejects_nonfinite_or_missing_coordinates(self):
+        for view in ({}, {'point': [float('nan'), 0, 1]}, {'off_screen': ('left', float('inf'))},
+                     {'off_screen': 'bad'}, {'point': [1, 0, -1]}):
+            self.assertIsNone(scope_ui._view_bearing(view))
+
     def test_missing_and_degenerate_fields_are_safe(self):
         cases = [None, {}, {'fix': {}}, {'scores': np.zeros((5, 5))}, {'scores': np.full((5, 5), np.nan)},
                  {'scores': []}, {'off_screen': ('above', 20)}, {'scores': np.ones((3, 3)), 'support_mask': np.ones((4, 4))},

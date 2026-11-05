@@ -226,9 +226,27 @@ def worth_remembering(fix):
     """Clearly located (z >= 20), or located (z >= 10) and above the room's average level. Measured
     Nov 4 on the real array: laptop-speaker bursts, a ring, speech and claps had z 55-89 at +2.6..+14 dB
     in a quiet room and z 22-27 just under the level of a loud vent; the room's own blips had z 4-7."""
-    z = float(fix.get('z') or 0.0)
-    snr = fix.get('snr_db')
-    snr = float(snr) if snr is not None and math.isfinite(float(snr)) else -99.0
+    if not isinstance(fix, dict) or fix.get('directional_ambiguous'):
+        return False
+    try:
+        z = float(fix.get('z') or 0.0)
+        raw_snr = fix.get('snr_db')
+        snr = float(raw_snr) if raw_snr is not None else -99.0
+        if not math.isfinite(z) or not math.isfinite(snr):
+            return False
+        if 'coherence' in fix:
+            coherence = float(fix['coherence'])
+            if not math.isfinite(coherence) or coherence <= 0:
+                return False
+        if 'direction' in fix:
+            direction = np.asarray(fix['direction'], dtype=float)
+            if (direction.shape != (3,) or not np.all(np.isfinite(direction)) or
+                    not np.any(direction)):
+                return False
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # Loudness alone cannot rescue weak spatial evidence. In particular, keep
+    # this event-average SNR gate distinct from any peak-frame loudness display.
     return z >= SURE_Z or (z >= MIN_Z and snr >= MIN_SNR_DB)
 
 

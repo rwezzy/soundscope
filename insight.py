@@ -1,7 +1,8 @@
 """Background enrichment: adds Meta model results to sound records without slowing the viewer.
 
 One worker thread sends one request at a time, under rate limits and the Meta budget. The
-localizer has already decided WHERE each sound is; these steps only add what, who and what's near:
+localizer supplies a candidate direction or surface; these steps add what, who and what's near.
+An object remains an unverified candidate even when a model agrees with it.
 
   label     free: nearest of your own recorded examples (references/, `soundscope.py enroll`)
   source    identify + context together, for a sound the camera can see: ONE Muse Spark call gets
@@ -18,6 +19,8 @@ localizer has already decided WHERE each sound is; these steps only add what, wh
 
 Results go into the sound memory and to on_result(record_id, kind, payload) for the screen.
 """
+import math
+import os
 import re
 import threading
 import time
@@ -33,11 +36,17 @@ ASSIST_WATCH = ('smoke alarm', 'doorbell', 'knock on the door', 'phone ringing',
 # Alerts must be worth interrupting someone for. Live test, Nov 4: every false alert (typing, a clap
 # read as a knock, a hum read as a phone) was under +4 dB over the room; the real ring and knock were
 # +14 and +19 dB. So: clearly audible, a reasonably sure label, and the same alert at most every 20 s.
-ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.6, 20.0
+# Live, Nov 4 evening: loud claps, snaps and whistles (+20 to +30 dB) came back as "knock" or "smoke alarm"
+# at 0.4-0.6 and raised false alerts, so an alert now needs a label at least 75% sure (65% when very loud).
+ALERT_MIN_SNR_DB, ALERT_MIN_CONFIDENCE, ALERT_REPEAT_S = 6.0, 0.75, 20.0
 # A very clear sound (20 dB or more over the room) alerts with a less sure label: missing an alarm is worse
 # than a false alarm. Live, Nov 4: a +33 dB ring was labeled "phone ringing" at only 0.4.
-ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.4
+ALERT_LOUD_SNR_DB, ALERT_LOUD_CONFIDENCE = 20.0, 0.65
 META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no Meta label
+# A spend-control heuristic for this recording gain, NOT calibrated dB SPL.
+# Quiet recordings remain available locally; explicit analysis can override this
+# digital floor, but never spatial-evidence, rate, or budget checks.
+AUTO_META_MIN_PEAK_DBFS = -50.0
 PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|speech|speaking|talking|voice)\b',
                     re.IGNORECASE)
 
@@ -109,6 +118,13 @@ class Enricher(threading.Thread):
         self.max_age_s = 45.0    # older sounds get no Meta request
         self.alerted = {}        # watched sound -> when it last raised an alert
         self.limits['source'] = RateLimit(*source_limit, clock=clock)
+        try:
+            self.auto_meta_min_peak_dbfs = float(os.environ.get(
+                'SOUNDSCOPE_AUTO_META_MIN_PEAK_DBFS', AUTO_META_MIN_PEAK_DBFS))
+        except (TypeError, ValueError) as exc:
+            raise ValueError('SOUNDSCOPE_AUTO_META_MIN_PEAK_DBFS must be a finite number between -160 and 0.') from exc
+        if not math.isfinite(self.auto_meta_min_peak_dbfs) or not -160 <= self.auto_meta_min_peak_dbfs <= 0:
+            raise ValueError('SOUNDSCOPE_AUTO_META_MIN_PEAK_DBFS must be a finite number between -160 and 0.')
 
     # -- queueing --------------------------------------------------------------------------------
 
@@ -133,6 +149,11 @@ class Enricher(threading.Thread):
                 self.process(task)
             except Exception as exc:  # one bad sound must never kill the worker
                 self.on_result(task['record']['id'], 'notice', f'Enrichment failed: {exc}')
+            finally:
+                if task.get('explicit') is True:
+                    self.on_result(task['record']['id'], 'analysis_status',
+                                   'Saved-event analysis finished. Review the available label or transcript; '
+                                   'unclear evidence may remain unlabelled.')
 
     # -- steps -----------------------------------------------------------------------------------
 
@@ -182,7 +203,16 @@ class Enricher(threading.Thread):
         record = task['record']
         rid = record['id']
         # A backlog formed (many sounds at once): old sounds keep their free label only.
-        stale = time.time() - record.get('epoch', time.time()) > self.max_age_s
+        now = time.time()
+        explicit = task.get('explicit') is True
+        # User-requested historical analysis has a fresh request time, while the
+        # original event timestamp remains untouched. Queued requests still expire.
+        request_at = task.get('requested_at') if explicit else record.get('epoch', now)
+        try:
+            age = now - float(request_at)
+            stale = not math.isfinite(age) or age < -1.0 or age > self.max_age_s
+        except (TypeError, ValueError, OverflowError):
+            stale = True
         acoustic = record.get('acoustic') or {}
         wav = task.get('wav')
         speech_like = acoustic.get('speech_score', 0) >= SPEECH_SCORE
@@ -199,6 +229,22 @@ class Enricher(threading.Thread):
         if stale:
             return
 
+        if not explicit:
+            # Use the raw, unnormalised input peak. WAV clips used by models are
+            # normalised, so neither their samples nor acoustic-profile peaks can
+            # substitute for this measurement.
+            try:
+                raw_peak = (record.get('loudness') or {}).get('peak_dbfs')
+                peak = float(raw_peak)
+                audible_recording = (not isinstance(raw_peak, bool) and math.isfinite(peak)
+                                     and peak >= self.auto_meta_min_peak_dbfs)
+            except (TypeError, ValueError, OverflowError):
+                audible_recording = False
+            if not audible_recording:
+                return  # free matching and local memory remain available
+
+        visual = usable_visual_evidence(record)
+
         # Worth a Meta label: at least a little above the room, and clearly located or clearly loud.
         # Live, Nov 4: blips at -2 dB came back as "knock on the door" and only cost credits.
         snr = (record.get('loudness') or {}).get('snr_db') or 0
@@ -210,7 +256,7 @@ class Enricher(threading.Thread):
                  else None)
         crop = task.get('crop_jpeg')
         checked = False
-        if (wav and crop is not None and strong and not speech_like and (not trusted_local or watch)
+        if (wav and crop is not None and visual and strong and not speech_like and (not trusted_local or watch)
                 and self._meta_ok('source', ('identify', 'context'))):
             reply = self._call(rid, self.meta.source_check, wav, crop, task.get('crop_before'), facts, watch, sheet,
                                task.get('crop_kind', 'color'))
@@ -268,7 +314,7 @@ class Enricher(threading.Thread):
 
         # Context alone only when the combined source check is not in use (no double spending), and
         # never for speech: the caption says enough, and the crop would show the person talking.
-        if (crop is not None and 'context' in self.features and 'identify' not in self.features
+        if (crop is not None and visual and 'context' in self.features and 'identify' not in self.features
                 and not checked and not speech_like):
             key = self._cell(record)
             cached = self.context_cache.get(key)
@@ -284,7 +330,7 @@ class Enricher(threading.Thread):
                     self.context_cache[key] = (self.clock(), patch)
                     self._update(rid, patch, 'context')
 
-        if task.get('outline') and task.get('frame_jpeg') is not None and not speech_like \
+        if visual and task.get('outline') and task.get('frame_jpeg') is not None and not speech_like \
                 and self._meta_ok('outline'):
             w, h = task['frame_size']
             u, v = task['pixel']
@@ -306,6 +352,28 @@ class Enricher(threading.Thread):
         if w.get('pixel'):
             return ('px', w['pixel'][0] // 64, w['pixel'][1] // 64)
         return ('dir', round((w.get('azimuth_deg') or 0) / 10), round((w.get('elevation_deg') or 0) / 10))
+
+
+def usable_visual_evidence(record):
+    """An isolated candidate with measured camera depth, never a guessed range.
+
+    make_record only writes point_m/distance_m/candidate_surface for measured
+    valid depth. A model's label or confidence cannot satisfy this gate.
+    """
+    where = record.get('where') or {}
+    if (where.get('quality') != 'candidate' or where.get('on_screen') is not True or
+            where.get('distance_kind') != 'candidate_surface'):
+        return False
+    point = where.get('point_m')
+    if not isinstance(point, (list, tuple)) or len(point) != 3:
+        return False
+    try:
+        values = [float(x) for x in point]
+        distance = float(where.get('distance_m'))
+        return (all(math.isfinite(x) for x in values) and values[2] > 0 and
+                math.isfinite(distance) and distance > 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _bare(noun):

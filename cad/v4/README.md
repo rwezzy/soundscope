@@ -60,4 +60,4 @@ Import the file as it is. The saddle prints front face down.
 
 **Check before you print:** the arm's cable port should sit above one of the gripper's two **rounder ends**,
 not above a flat side where its screws are. That's what UFACTORY's model shows. If yours is different,
-tell Claude and the slot moves.
+adjust the slot position to match the measured fit.

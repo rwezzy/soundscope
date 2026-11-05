@@ -1,44 +1,67 @@
-# Demo video: 2-3 minutes
+# SoundScope presentation checklist
 
-The story: **sounds you can't hear, made visible.** One idea per shot. Screen-record the viewer
-(it records no audio) and film the room with a phone at the same time, so the sounds are heard.
+The current demonstration is **standalone**: Gemini 2, reSpeaker and the laptop. Use the
+[90-second recording guide](DEMO_VIDEO.md) for commands, controls and the full shot list.
+No robot integration is required for this presentation.
 
-## Before recording (10 min)
+## One clear claim
 
-- **Lights on**, camera and mic board in the adjustable ring holder (`--mount carrier_v3`), on a
-  desk or the floor, facing the room. Other stands: `--mount tripod` (compact) or `--mount stand_v5`.
-- Play test sounds from a phone set **away from you** (to one side), not the laptop in front of you:
-  Muse Spark sees a picture of the sound's spot, so it should show the phone, not your face.
-  If people in shot don't want pictures sent, add `--private`.
-- Alerts need a sound clearly louder than the room (about +6 dB): play it loud or close.
-  Plug both into the laptop (the camera into a USB 3 port). If SoundScope says "No Orbbec camera
-  is plugged in", replug it.
-- Calibrate once: `python scope.py --mount carrier_v3`, press **C**, clap left / center / right and click
-  each spot while it sounds, **Enter**. Quit with **Q**.
-- Optional, makes alerts instant and free: `python soundscope.py enroll "doorbell"` (play your doorbell
-  or a doorbell sound after each Enter). Same for "smoke alarm".
-- Start fresh: rename today's file in `recordings/memory/` if it has test sounds in it.
-- `python soundscope.py budget`: a full demo uses well under $0.50 of the $1 daily cap.
+> SoundScope turns acoustic events into a visual, searchable history, so you can ask what happened
+> and inspect the captured sound and scene behind the answer.
 
-## Shots
+The microphone array supplies directional evidence. Camera depth identifies a compatible visible
+surface. Meta adds likely labels, captions, visual context and semantic retrieval. Keep those roles
+distinct: the camera is not used to guess which recognizable object must be making noise.
 
-| # | Time | Do | Say (or caption) | Screen shows |
-|---|---|---|---|---|
-| 1 | 0:00-0:15 | The rig, then the viewer | "If you can't hear a sound, you also can't tell where it came from. SoundScope shows you." | The stand, the dashboard |
-| 2 | 0:15-0:35 | `python scope.py --mount carrier_v3 --assist --name Keith`. Clap on the left, then the right. | "Four microphones find the direction with physics, not a model; the depth camera shows the spot." | Heat map jumps to each clap, distance in meters |
-| 3 | 0:35-0:55 | Play a smoke alarm sound from a phone on one side of the room. | "Muse Spark recognizes it from its spectrogram and SoundScope says where it is." | Red banner **ALERT: smoke alarm (to the left)**, beep |
-| 4 | 0:55-1:20 | Someone says "Keith, dinner's ready" from the other side. | "Muse Voice Transcribe writes it down; the mics say who and where. Your name raises an alert." | Caption at the talker, **ALERT: Speaker 1 said "Keith" (to the right)** |
-| 5 | 1:20-1:40 | A phone rings on the table. | "Muse Spark looks at the sound and at the spot the mics picked, before and after; SAM 3.1 outlines the object." | "phone ringing: a phone (sound + sight agree)", outline around the phone |
-| 6 | 1:40-2:00 | Press **V**: "Did anyone knock while I was away?" | "Every sound is remembered: when, where, how loud. Ask in plain words." | Answer in Field Notes, marker where it happened |
-| 7 | 2:00-2:15 | Terminal: `python soundscope.py digest --minutes 10`, then `python soundscope.py map` | "A summary of what happened, and a map of where." | Digest text, sound map |
-| 8 | 2:15-2:35 | (Optional) Arm with the wrist mount: `python arm_follow.py --mount wrist_v4 listen` (dry run, or `--live` with the E-stop in hand). Clap to one side. | "The same directions can turn a robot toward a sound." | Arm turning, or the printed turn plan |
-| 9 | 2:35-2:50 | Back to the viewer | "No image detection decides where a sound came from. Physics picks the spot; Meta models explain it." | Closing frame |
+## Before recording
 
-## If something goes wrong
+- Check the actual fixed rig and profile: the current carrier is forward-facing, USB edge up,
+  microphone centre about 13 cm above the lens, `mirror=false`.
+- Test left/centre/right once. Three-position calibration adjusts yaw only; do not assume it fixes
+  incorrect dimensions, camera pitch, orientation or room reflections.
+- Start a separate take with `demo.ps1`; earlier recordings are preserved. Use a free rehearsal first.
+- Make one clear ringtone event. Open history with **B** and verify saved WAV audio and scene JPEG
+  availability. Replay is explicit with **E**; missing media must not be presented as captured evidence.
+- Screen video is silent. Record the real sounds and narration with a phone or screen-recorder audio.
+- Keep the measured scene, sounds, overlays and history results from the same genuine test.
 
-- Nothing appears when you clap: clap louder or closer. A fan or heater switching on is absorbed as
-  background within ~3 s.
-- Labels arrive 5-15 s after a sound (Muse Spark checks three at once, newest first). Pause between sounds.
-- "Meta features paused": the daily budget is used up; raise `META_DAILY_LIMIT_USD` in `.env`.
-- No camera at hand: `python soundscope.py listen --assist --name Keith` does alerts and captions
-  with the mics alone (terminal output, no picture).
+## The sequence
+
+1. **Problem and rig:** “A sound happened while I was distracted. What did I miss?”
+2. **Live evidence:** clap left, then ring the visible source on the right. The scene remains still
+   while the acoustic map responds. Show a weak/ambiguous state honestly if one occurs.
+3. **Interpretation:** allow the likely label or caption to arrive. Model latency varies.
+4. **Question:** press **T**, ask “When did the phone ring?”, and submit.
+5. **Verification:** show the matching event's time, saved scene and audio replay. The highlighted
+   location is historical and the visible surface remains an unverified source candidate.
+6. **Grounded absence:** if appropriate for the actual recording, ask about a sound that has no
+   matching event. Distinguish “no record” from “never happened.”
+7. **Close:** local localization, model interpretation, and evidence you can revisit.
+
+Use **F** for fullscreen, **M** for heatmap colors, **B** for history, **E** for explicit replay,
+**T** for typed search, **V** for spoken commands and **Q** to finish cleanly.
+
+## Optional additions
+
+If already working reliably, show a caption with approximate talker direction, a watched-sound
+alert, or a SAM outline. They do not all need to appear. A model label is tentative; a speaker label
+is not verified personal identity; an outline is not proof of the source. Recorded reference
+examples demonstrate similarity to those examples, not universal recognition.
+
+Model alerts currently require +6 dB estimated SNR and 0.75 reported confidence, or 0.65 at +20 dB
+or louder, with a 20-second repeat suppression. These are prototype heuristics, not a life-safety
+alarm guarantee. Avoid making an emergency-detection claim in the pitch.
+
+## When something is unavailable
+
+- **Direction is wrong:** inspect orientation/profile and calibration; do not hide it with a guessed label.
+- **No event:** reduce competing noise and repeat a visible, clearly audible source at a reasonable level.
+- **Slow labels:** wait or trim the real waiting time in editing. Do not substitute another event's result.
+- **Budget pause:** preserve localization and local search. Check estimated spend and pending reservations;
+  do not automatically raise limits. A complete demo has no guaranteed fixed API cost.
+- **Missing camera:** microphone-only terminal mode remains available, but it has no saved scene or depth.
+- **No saved media:** show the metadata as such; do not claim a captured clip or frame that is absent.
+
+For the Meta-enabled take, `demo.ps1` sets estimated limits of $0.20 per session and $1 per day.
+These are application estimates, not an exact provider billing cap. `--private` means no camera-image
+uploads; enabled labeling/transcription may still send spectrogram images or speech audio.

@@ -3,8 +3,14 @@
   python -m unittest test_meta_api
 """
 import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import os
+from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -39,6 +45,94 @@ class Budgets(unittest.TestCase):
         day[0] = '2026-11-05'
         other.check(0.04, 'search')                    # a new day starts from zero
         self.assertEqual(other.summary()['today_usd'], 0.0)
+
+    def test_pending_request_counts_against_daily_and_session_limits(self):
+        budget = Budget(daily_usd=0.01, session_usd=0.01, path=self.path)
+        with budget.reserve(0.007, 'identify') as ticket:
+            with self.assertRaises(BudgetError):
+                budget.reserve(0.007, 'search')
+            self.assertAlmostEqual(budget.summary()['pending_session_usd'], 0.007)
+            ticket.settle(0.002)
+        self.assertAlmostEqual(budget.summary()['today_usd'], 0.002)
+        self.assertEqual(budget.summary()['pending_today_usd'], 0)
+        self.assertEqual(budget.summary()['calls_today'], {'identify': 1})
+        ticket.settle(0.002)  # duplicate completion cannot bill twice
+        self.assertEqual(budget.summary()['calls_today'], {'identify': 1})
+
+    def test_exception_releases_a_reservation(self):
+        budget = Budget(daily_usd=0.01, session_usd=0.01, path=self.path)
+        with self.assertRaisesRegex(RuntimeError, 'failed'):
+            with budget.reserve(0.01, 'identify'):
+                raise RuntimeError('failed')
+        with budget.reserve(0.01, 'search'):
+            pass
+        self.assertEqual(budget.summary()['today_usd'], 0)
+        self.assertEqual(budget.summary()['pending_today_usd'], 0)
+        self.assertEqual(budget.summary()['calls_today'], {})
+
+    def test_concurrent_threads_and_budget_instances_cannot_overbook(self):
+        for shared_instance in (True, False):
+            with self.subTest(shared_instance=shared_instance):
+                path = self.path + str(shared_instance)
+                first = Budget(daily_usd=0.01, session_usd=0.01, path=path)
+                second = first if shared_instance else Budget(daily_usd=0.01, session_usd=0.01, path=path)
+                barrier = threading.Barrier(2)
+                def reserve(budget):
+                    barrier.wait(timeout=2)
+                    try:
+                        return budget.reserve(0.007, 'identify')
+                    except BudgetError:
+                        return None
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    tickets = list(pool.map(reserve, [first, second]))
+                self.assertEqual(sum(ticket is not None for ticket in tickets), 1)
+                for ticket in tickets:
+                    if ticket is not None:
+                        ticket.settle(0.007)
+                self.assertAlmostEqual(first.summary()['today_usd'], 0.007)
+
+    def test_separate_processes_share_atomic_daily_reservations(self):
+        script = '''
+import sys, time
+from meta_api import Budget, BudgetError
+b = Budget(daily_usd=0.01, session_usd=1, path=sys.argv[1])
+try:
+    with b.reserve(0.007, 'test') as ticket:
+        time.sleep(0.15)
+        ticket.settle(0.007)
+    print('accepted')
+except BudgetError:
+    print('refused')
+'''
+        workers = [subprocess.Popen([sys.executable, '-c', script, self.path],
+                                    cwd=Path(meta_api.__file__).parent,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                   for _ in range(2)]
+        try:
+            results = [worker.communicate(timeout=15) for worker in workers]
+        finally:
+            for worker in workers:
+                if worker.poll() is None:
+                    worker.kill()
+                    worker.wait(timeout=3)
+        for worker, (_, error) in zip(workers, results):
+            self.assertEqual(worker.returncode, 0, error)
+        self.assertEqual(sorted(output.strip() for output, _ in results), ['accepted', 'refused'])
+        self.assertAlmostEqual(Budget(path=self.path).summary()['today_usd'], 0.007)
+
+    def test_abandoned_reservation_is_not_optimistically_expired(self):
+        first = Budget(daily_usd=0.01, session_usd=1, path=self.path)
+        ticket = first.reserve(0.01, 'identify')
+        later = Budget(daily_usd=0.01, session_usd=1, path=self.path)
+        with self.assertRaises(BudgetError):
+            later.reserve(0.001, 'search')
+        self.assertEqual(later.summary()['pending_today_usd'], 0.01)
+        ticket.release()
+
+    def test_corrupt_ledger_fails_closed(self):
+        Path(self.path).write_text('{broken', encoding='utf-8')
+        with self.assertRaises(BudgetError):
+            Budget(path=self.path).reserve(0.001, 'search')
 
 
 class FakeMeta(Meta):
@@ -103,6 +197,42 @@ class Requests(unittest.TestCase):
         with self.assertRaises(MetaError):
             meta.parse_command('find my keys')
         self.assertEqual(meta.budget.summary()['session_usd'], 0.0)
+        self.assertEqual(meta.budget.summary()['pending_today_usd'], 0.0)
+
+    def test_concurrent_http_call_is_refused_before_sending(self):
+        meta = FakeMeta([], session_usd=0.01)
+        arrived, release = threading.Event(), threading.Event()
+        def request_stub(*_):
+            arrived.set()
+            self.assertTrue(release.wait(timeout=3))
+            return chat_reply({'ok': True}, prompt_tokens=1, completion_tokens=1)
+        meta._post = mock.Mock(side_effect=request_stub)
+        schema = {'required': ['ok'], 'properties': {'ok': {'type': 'boolean'}}}
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(meta.chat_json, meta.text_model, 'test', schema, 'test')
+            try:
+                self.assertTrue(arrived.wait(timeout=3))
+                with self.assertRaises(BudgetError):
+                    meta.chat_json(meta.text_model, 'test', schema, 'test')
+                self.assertEqual(meta._post.call_count, 1)
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=3), {'ok': True})
+        self.assertEqual(meta.budget.summary()['pending_today_usd'], 0)
+
+    def test_accepted_malformed_chat_reply_is_charged_and_reservation_closed(self):
+        meta = FakeMeta([{}])
+        with self.assertRaises(MetaError):
+            meta.parse_command('find my keys')
+        self.assertGreater(meta.budget.summary()['session_usd'], 0)
+        self.assertEqual(meta.budget.summary()['pending_today_usd'], 0)
+
+    def test_transcription_failure_releases_reservation(self):
+        meta = FakeMeta([MetaError('HTTP 500')])
+        with self.assertRaises(MetaError):
+            meta.transcribe(clip())
+        self.assertEqual(meta.budget.summary()['today_usd'], 0)
+        self.assertEqual(meta.budget.summary()['pending_today_usd'], 0)
 
     def test_command_schema_has_search_who_describe(self):
         meta = FakeMeta([chat_reply({'action': 'search', 'sound': '', 'question': 'When did the phone ring?',
@@ -142,6 +272,25 @@ class Requests(unittest.TestCase):
 
 
 class Segmentation(unittest.TestCase):
+    def test_accepted_sam_stream_charged_once_even_when_stream_reports_failure(self):
+        meta = FakeMeta([])
+        stream = [b'data: {"type":"response.failed","error":"decode failed"}\n', b'\n']
+        with mock.patch.object(meta, '_open', return_value=nullcontext(stream)):
+            with self.assertRaises(MetaError):
+                meta.segment_at(b'jpeg', 640, 480, 10, 20)
+        summary = meta.budget.summary()
+        self.assertEqual(summary['calls_today'], {'outline': 1})
+        self.assertAlmostEqual(summary['today_usd'], 0.0025)
+        self.assertEqual(summary['pending_today_usd'], 0)
+
+    def test_sam_http_failure_releases_reservation(self):
+        meta = FakeMeta([])
+        with mock.patch.object(meta, '_open', side_effect=MetaError('HTTP 500')):
+            with self.assertRaises(MetaError):
+                meta.segment_at(b'jpeg', 640, 480, 10, 20)
+        self.assertEqual(meta.budget.summary()['today_usd'], 0)
+        self.assertEqual(meta.budget.summary()['pending_today_usd'], 0)
+
     def test_point_prompt_matches_meta_helper(self):
         text = meta_api.sam_point_prompt(1280, 800, 640.7, 900)
         self.assertEqual(text, '<0f>1<|point;x=640;y=799;w=1280;h=800|>')

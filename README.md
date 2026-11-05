@@ -1,154 +1,202 @@
 # SoundScope
 
-**See where a sound came from, what it was, and who said what.**
+**See a sound's direction. Ask what happened. Inspect the recorded evidence.**
 
-Many people miss sounds that matter: someone who is Deaf or hard of hearing, someone wearing
-headphones, anyone in another room. Even when a sound is noticed, it is hard to tell *where* it came
-from. A smoke alarm, the doorbell, a knock, a phone, a baby, someone calling your name.
+A phone rings while you are wearing headphones. Someone calls from another part of the room.
+You notice too late and want to know what happened. SoundScope combines a live acoustic map with
+a searchable local sound history: likely sound labels, captions, time, direction, nearby visual
+context, and saved evidence you can revisit.
 
-SoundScope puts sound on a screen. Four microphones find **where** a sound came from (physics, not a
-model) and a depth camera shows **the spot**. Meta's models add **what it was**, **who said what**,
-**what object is there**, and a memory you can ask later: *"did someone knock while I was out?"*
-It is a sound-awareness aid, not a medical device.
+Four microphones measure acoustic direction. A depth camera supplies visible surfaces consistent
+with that direction. Meta models interpret and retrieve those observations. A highlighted surface
+is a **candidate**, not proof that the object made the sound. This is an experimental sound-awareness
+prototype, not an emergency alarm or a validated accessibility or medical device.
 
+```powershell
+python scope.py --mount carrier_v3 --assist
 ```
-python scope.py --mount carrier_v3 --assist --name Keith
-```
 
-| You get | How |
+| Feature | What it provides |
 |---|---|
-| **Alerts** for a smoke alarm, doorbell, knock, phone, baby crying, kettle, and **your name**: a red banner, a beep and the direction ("ALERT: doorbell (to the left)") | Muse Spark (and your own recorded examples, for free) |
-| **Captions placed at the talker**: "Speaker 1 (to the left): dinner is ready" | Muse Voice Transcribe (speaker turns) + the mics' direction |
-| **The object that made the sound**, checked against the picture before and after it | Muse Spark (spectrogram + camera) and SAM 3.1 outline |
-| **A memory you can ask**: when, where, how loud, what was near | Muse Spark answers only from stored facts |
-| **Voice control**: "find my keys", "tell me when the kettle whistles", "who is talking?" | Muse Voice Transcribe + Muse Spark |
+| **Live sound map** | Acoustic agreement over the camera view, with weak/ambiguous/candidate states |
+| **Evidence history** | Saved event metadata and, when available, the captured WAV and scene JPEG; explicit audio replay |
+| **Semantic search** | Questions such as “When did the phone ring?” retrieve stored events; answers render their recorded facts |
+| **Captions and watch alerts** | Speech transcription, approximate direction, and likely watched-sound matches |
+| **Nearby context and outlines** | Models describe or outline the visible candidate selected by acoustic evidence |
+| **Voice commands** | Spoken search and watch commands, through transcription and intent parsing |
 
-**Hard rule: no image detection decides where a sound came from.** The microphones pick the spot
-first; the camera and the vision models only describe, outline or double-check *that* spot.
+**No image detector selects the sound direction.** Acoustic time differences supply the spatial
+evidence. Visible depth surfaces constrain candidate locations; vision models describe those
+candidates afterward. Neither that agreement nor an outline establishes the true sound source.
 
-## Works standalone
+## Standalone setup
 
-SoundScope does not need the robot or a particular mount. Each setup is just a geometry profile
-(where the mic board sits relative to the camera); calibration (**C**, three claps) fixes the rest.
+The main application uses a **reSpeaker XVF3800** with raw four-microphone capture and an **Orbbec
+Gemini 2** with aligned color and depth. It needs no robot. Keep both sensors rigidly fixed relative
+to each other. The microphone needs the **16 kHz six-channel firmware**; see `mic_test.py`.
 
-| Setup | Run |
+| Setup | Command or profile |
 |---|---|
-| **Current rig:** camera on its tripod, board in the adjustable ring carrier v3 (printed screws; fits boards 96-102 mm and cameras ~88-91 mm wide; designed in the parallel SoundScope build, print files not in this repo yet) | `python scope.py --mount carrier_v3 --assist` |
-| Camera on its tripod, board on the printed compact stand (on a desk, shelf or the floor) | `python scope.py --mount tripod --assist` |
-| Size-tolerant printed stand (`cad/v5_stand/`) or the v3 stand (`cad/v3/`) | `--mount stand_v5` / `--mount stand_v3` |
-| **No camera at all**: just the mic board, anywhere | `python soundscope.py listen --assist --name Keith` |
-| Optional robot demo: camera + mics on the Lite 6 gripper (`cad/v4/`) | `python scope.py --mount wrist_v4`, `python arm_follow.py --mount wrist_v4 listen` |
+| Current adjustable ring carrier, camera on its tripod | `python scope.py --mount carrier_v3 --assist` |
+| Compact printed tripod stand | `python scope.py --mount tripod --assist` |
+| Other existing stand designs | `--mount stand_v5` or `--mount stand_v3` |
+| Microphone only, terminal output | `python soundscope.py listen --assist` |
 
-Camera tilted up or down (on the floor, on a shelf)? Put the angle in the profile's `pitch_deg`.
-Nothing about the localization depends on the arm; the arm only consumes the same directions.
+The current `carrier_v3` profile assumes the board is upright, USB edge up, LED side facing the same
+scene as the camera, with its centre approximately **130 mm above the color lens** and `mirror=false`.
+Other offsets remain physical/CAD estimates. Select the profile matching the actual assembly.
 
-## What Meta does here
+**C** starts a three-position yaw calibration; **Enter** saves the fit. It corrects horizontal
+angular alignment, not every dimension of the rig. It cannot repair wrong microphone orientation,
+translation, camera tilt, depth alignment, or a flexible mount. Set camera pitch in the profile and
+check left, centre and right with actual sounds after moving or reassembling the sensors.
 
-| Model | Use in SoundScope | Checked live (Nov 4) |
-|---|---|---|
-| **Muse Spark 1.3** | Labels each clear sound from a **spectrogram picture** (the API drops raw audio), next to your own recorded examples when you have some; reports which watched sounds it is | "phone ringing", 0.92, from a dual-tone ring |
-| **Muse Spark 1.3** | **Sound object check**: one call gets the spectrogram plus camera crops of the spot the mics picked, before and after the sound, and returns the object there, what visibly happened, and whether sound and sight agree | "The phone rang and its screen lit up blue" |
-| **Muse Spark 1.3** | **Night mode**: in a dark room the crop is the depth camera's 3D relief instead | saw "a round device" from depth alone |
-| **Muse Spark 1.3** | Voice commands (find, follow, watch, stop, search, who, describe); answers about the memory; `soundscope.py digest` summaries | all test phrases parsed right; correct grounded answers |
-| **Muse Voice Transcribe** | Commands (keyword-biased) and **captions with speaker turns** (DIARIZATION); each turn's direction names the talker; your name in a caption raises an alert | two voices → turns A and B with timings; commands word for word through the board |
-| **SAM 3.1** | Outlines the object at the spot the sound picked (**point prompt**, never a text search), automatically when sound and sight agree | exact outline of the test object |
-
-**Budget guard:** every call is priced before it is sent and refused if it would cross
-`META_DAILY_LIMIT_USD` (default $1.00 a day, shared by all SoundScope programs) or
-`META_SESSION_LIMIT_USD` ($0.50). A label or object check costs about $0.003-0.01, a caption about
-$0.0003, an outline $0.0025. Background checks use Muse Spark's fast `minimal` reasoning;
-commands and searches use `low`. Contributor model tiers (they train on your data) are never used.
-Without `--assist`/`--meta`, nothing is sent unless you press **V**.
+Optional arm experiments remain in `ARM_SETUP.md`; they are separate from the standalone demo.
+A wrist rig needs its own calibration and hardware verification. Autonomous pickup is not a
+validated capability of this build.
 
 ## Run it
 
-```
+```powershell
 pip install -r requirements.txt
-python scope.py --mount carrier_v3 --assist --name Keith   # sound awareness, everything on
-python scope.py --mount carrier_v3 --assist --private     # same, but no pictures leave the computer
-python scope.py --mount carrier_v3                        # live view + local memory, no Meta requests
-python scope.py --watch "dog barking" --meta           # add your own alerts
-python soundscope.py enroll "doorbell"                 # record your doorbell: free, instant label
-python soundscope.py search "did the doorbell ring?"   # ask the memory
-python soundscope.py digest --minutes 60               # what happened while you were away
-python soundscope.py map                               # where every sound came from
-python soundscope.py listen --assist                   # mics only, no camera
-python soundscope.py budget                            # today's Meta spend
-python -m unittest discover                            # 182 offline tests, no hardware or network
+python scope.py --mount carrier_v3                         # local viewer and memory; no automatic Meta calls
+python scope.py --mount carrier_v3 --assist                # captions, labels, context and eligible outlines
+python scope.py --mount carrier_v3 --assist --private      # no camera-image uploads
+python scope.py --mount carrier_v3 --watch "dog barking" --meta
+python soundscope.py enroll "doorbell"                    # record examples for local matching
+python soundscope.py search "did the doorbell ring?"
+python soundscope.py digest --minutes 60
+python soundscope.py map                                  # remembered directions
+python soundscope.py budget
+python -m unittest discover                              # offline verification; no hardware or paid APIs
 ```
 
-Meta features need `MODEL_API_KEY` in `meta-soundscope/.env` (or `--env-file path/to/.env`).
-The mic array needs the 16 kHz 6-channel firmware (steps at the top of `mic_test.py`).
+Meta features require `MODEL_API_KEY` in the project's `.env`, or `--env-file path/to/.env`.
+Never commit that file. In Windows, the camera should use a USB 3 port. Keep other applications
+that claim the camera or microphone closed.
 
-**In the viewer:** **V** = voice command, **L** = last sounds, **C** = calibrate (three positions,
-**Enter** saves), **H** = heat map, **D** = diagnostics, **Space** = pause, **S** = snapshot, **Q** = quit.
-A search also marks on the picture where the matching sounds happened.
+For isolated recording takes with an explicit spending limit, see [the standalone video guide](DEMO_VIDEO.md).
+`demo.ps1` keeps each take's memory separate without deleting previous experiments.
 
-## How it decides
+| Key | Action |
+|---|---|
+| **F** | Fullscreen |
+| **M** / **H** | Change heatmap palette / show or hide it |
+| **T**, then **Enter** | Type and submit a history question; Esc cancels |
+| **B** | Browse saved events; Up/Down selects, B or Esc returns to live view |
+| **E** | Explicitly replay the selected event's saved audio, when available |
+| **A** in history | Request Meta analysis of the selected saved event; requires Meta enabled and available budget |
+| **V** | Record a spoken command; this can use Meta credits |
+| **L** | Show recent remembered sounds |
+| **C** / **D** | Calibrate / diagnostics |
+| **Space** / **S** / **Q** | Pause / save a diagnostic snapshot / quit cleanly |
 
-- **Where:** SRP-PHAT over the 4 raw mics, weighted by each frequency's rise above the room's noise,
-  with echo rejection; the depth camera's visible 3D points are scored against the mic evidence, so
-  the sound picks a surface in the picture.
-- **Steady noise:** the noise floor follows minimum statistics, so a heater or fan switching on
-  becomes background within ~3 s instead of swallowing later sounds; any sound that never stops is
-  reported every 8 s. Tuned on real recordings with a loud vent.
-- **What:** free local measurements first (loudness over the room, length, pitch, bursts, speech
-  likelihood, nearest of your examples); Muse Spark only for sounds at least +3 dB over the room,
-  three at a time, newest first, rate-limited.
-- **Alerts:** only when worth interrupting: at least +6 dB over the room and a label at least 60% sure
-  (40% at +20 dB or louder, so a loud alarm is not missed); the same alert at most every 20 s.
-- **Memory:** each clearly located sound becomes a record (`recordings/memory/*.jsonl`, local,
-  git-ignored): when, where, how loud, what, who said what, the object at the spot, alerts.
+The history view shows a **saved scene**, not a live camera fix. Its timestamp, scene/audio timing
+information and availability matter. A scene JPEG is one captured frame, not an event video clip.
+A replay may be normalized: playback volume does not reproduce the original sound pressure.
 
-## Measured on the real hardware (Nov 4, laptop speaker ~40° left, ~1 m)
+## What Meta contributes
 
-- Separate sounds stay separate: 3 noise bursts → 3 records, a ring → 1 ("tonal around 1.4 and
-  1.8 kHz"), a sentence → 2 speech records with captions, 2 claps → 1 record ("two clicks").
-- Direction is consistent: 37-42° left on every test sound; earlier accuracy trial 5.4° mean error at 1 m.
-- Loud vent recording: all 3 claps found separately and on target (a 3 s-chunking alternative found 1).
-- Voice commands through the board: "find my keys", "when did the phone ring", "tell me when the
-  kettle whistles" transcribed word for word and understood.
-- Your examples: after 2 takes each, a smoke alarm and a knock were labeled correctly for free, and
-  the smoke-alarm watch raised its alert.
-- Wrist mode (dry run): a knock 38° left → the arm would turn J1 0° → 30° → 38°.
-- Limits: spectrogram labels can be wrong ("dog bark" for a noise burst), so uncertain ones say
-  "probably"; laptop speech across a room loses words; depth gives the visible surface along the
-  direction, not proof of the source. Captions were tested mostly with computer voices.
+| Model | Role | Limit |
+|---|---|---|
+| **Muse Spark 1.3** | Likely sound label from a spectrogram image, optionally alongside recorded reference examples | This application uses image input for sound interpretation; classifications can be wrong |
+| **Muse Spark 1.3** | Nearby scene context and a comparison of the acoustic event with camera crops | Visual agreement is a model judgment, not source verification or proof of a hidden object |
+| **Muse Spark 1.3** | Command interpretation and semantic retrieval of event IDs | History search discards invented IDs and renders factual answers from stored records |
+| **Muse Voice Transcribe** | Spoken commands and captions with within-clip speaker turns | Speaker labels are not verified identities; spatial naming is approximate and can change |
+| **SAM 3.1** | Point-prompt outline of an eligible visible candidate | Outlines an object boundary; does not locate sound independently |
 
-**Ring holder, assist mode (Nov 4, live):**
-- A person saying "Hi, my name is Keith" → `ALERT: Speaker 2 said "Keith" (slightly left)`.
-- Smoke alarm → `ALERT: smoke alarm (straight ahead)`; knock → `ALERT: knock on the door`.
-- A faint doorbell (+5 dB) was labeled "Doorbell" without an alert; faint blips no longer raise
-  false knocks.
-- Results arrived about 6-13 s after each sound (10-44 s before, with one worker).
+Local reference matching labels resemblance to **your recorded examples**. It is not a trained,
+universal sound recognizer and needs testing on different takes and competing sounds. A user-entered
+speaker name or familiar example label does not establish a person's identity or a source's identity.
+
+Meta is optional for localization. Semantic interpretation enriches the event history while the
+microphone/depth pipeline continues locally. Search falls back to local retrieval when Meta is
+unavailable. A missing match means “not found in recorded events,” not “that sound never occurred.”
+
+## Estimated spending limits
+
+Every API path reserves an **estimated** request cost before sending it. Pending reservations count
+against both `META_SESSION_LIMIT_USD` (default **$0.50**) and `META_DAILY_LIMIT_USD` (default **$1.00**).
+Daily accounting is shared across processes using the same usage ledger, with atomic file locking.
+Accepted requests settle at reported usage when available; failed requests release their hold.
+A reservation left by a crashed process remains held through that accounting day.
+
+These are application estimates, **not an exact ceiling on Meta's invoice**: input-token estimates
+and provider billing can differ. Typical development estimates were roughly $0.003–0.01 for a
+label/context call, $0.0003 for a short caption and $0.0025 per outline; duration, tokens and model
+pricing affect cost. Inspect `python soundscope.py budget` and the provider dashboard.
+
+Background checks use `minimal` reasoning; commands and searches use `low`. Contributor tiers are
+refused. Without Meta feature flags there are no automatic model calls; **V** explicitly requests a
+voice interaction. `demo.ps1` sets zero limits for a free rehearsal.
+
+Automatic enrichment also requires a recorded raw audio peak of at least **-50 dBFS** by default
+(`SOUNDSCOPE_AUTO_META_MIN_PEAK_DBFS`). This is a credit-saving heuristic for the current microphone
+gain, not a calibrated physical loudness threshold. Quiet accepted events can still be saved and
+matched against local examples. In history, **A** explicitly requests analysis of a saved event,
+bypassing that automatic peak filter while retaining the spending limits and its original timestamp.
+
+## What is measured, and what is inferred
+
+- **Direction:** SRP-PHAT over four raw microphones, weighted by frequency evidence above estimated
+  room noise. Echoes, narrow tones, multiple sources and weak sounds can produce broad or wrong peaks.
+- **Distance:** depth of a visible candidate surface. It is not an independent acoustic range measurement.
+- **Loudness:** estimated signal-to-noise ratio or recorded dBFS. This rig is not calibrated in dB SPL.
+- **Labels and nearby objects:** model or reference-example interpretations, with their confidence and provenance.
+- **Alerts:** model matches require at least +6 dB estimated SNR and 0.75 reported confidence, or
+  0.65 confidence at +20 dB or louder. The same watched alert is suppressed for 20 seconds. These
+  thresholds are heuristics; model confidence is not a measured probability of correctness.
+- **Memory:** accepted events, not every sound in the room. Filtering, event grouping, a busy worker,
+  or unavailable evidence can omit events or media. Missing media are shown as unavailable.
+
+A phone under a pillow may be audible, but seeing a pillow along the sound direction does not prove
+“the phone is under this pillow.” History search suppresses unsupported hidden-object relationships.
+It answers about past observations; it does not track a silent object after the recording.
+
+## Earlier development observations
+
+The following are **archived development observations from November 4**, with earlier geometry,
+calibration and test conditions. They are not fresh accuracy measurements for the current assembly:
+
+- A laptop speaker placed roughly 40° left at about 1 m produced reported directions of 37–42°.
+  Earlier notes reported 5.4° mean angular error in a separate 1 m trial.
+- Three noise bursts were recorded as three events; a ringtone as one; a sentence as two speech
+  events; two claps as one grouped event. Event boundaries depend on pauses and the detector.
+- Recorded ring, knock and name examples produced labels or alerts in some live trials. False
+  labels also occurred, including noise interpreted as barking and claps interpreted as alarms.
+- Some label/caption results arrived 6–13 seconds after a sound. Service latency and backlog vary;
+  those numbers are not a real-time guarantee. Caption trials included synthesized voices.
+
+Re-check current left/centre/right behavior on the assembled rig before presenting accuracy numbers.
+The repository's automated tests cover software behavior and synthetic/recorded cases; they do not
+prove general room-scale localization or sound classification accuracy.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `scope.py`, `scope_ui.py` | Live viewer: heat map, spot, calibration, voice, captions, alerts, memory |
-| `sound_memory.py` | Records, local measurements, search, your examples, talker names |
-| `insight.py` | Background Meta worker: labels, object check, captions, outlines, watch alerts |
-| `meta_api.py` | Meta Model API calls and the budget guard |
-| `soundscope.py` | Command line: search, digest, map, log, enroll, listen (mics only), budget |
-| `doa.py`, `mic_test.py` | Direction finding; mic checks and accuracy trial |
-| `camera.py` | Orbbec Gemini 2 color + aligned depth |
-| `calibration.py`, `localization_quality.py` | Multi-position yaw fit; weak/ambiguous/candidate labels |
-| `arm_follow.py`, `aim.py`, `arm_config.toml` | Optional arm: safety gate, base and wrist modes, Viam |
-| `profiles/` | Setup geometry: carrier_v3 (ring holder), tripod (compact stand), stand_v3, stand_v5, wrist_v4 |
-| `cad/` | Printed mounts: `v3/`, `v4/` (wrist), `v5_stand/` (size-tolerant stand) |
-| `test_*.py`, `test_data/` | Offline tests; real array clips (text-to-speech and test tones) |
-| `ARM_SETUP.md`, `DEMO.md` | Arm setup; demo-video shot list |
+| `scope.py`, `scope_ui.py` | Live view, heatmap, calibration, voice and event integration |
+| `history_ui.py`, `event_evidence.py` | Saved-event display and local WAV/JPEG evidence |
+| `sound_memory.py` | Event records, grounded search, local examples and approximate speaker labels |
+| `insight.py` | Background labeling, captions, visual context, outlines and watch alerts |
+| `meta_api.py` | Model calls and atomic estimated-budget reservations |
+| `soundscope.py` | Terminal search, digest, map, enrollment and microphone-only mode |
+| `doa.py`, `mic_test.py` | Acoustic direction estimation and microphone checks |
+| `camera.py`, `calibration.py`, `localization_quality.py` | Aligned depth/color, yaw fitting and uncertainty states |
+| `profiles/`, `cad/` | Geometry profiles and available printable mount designs |
+| `arm_follow.py`, `arm_target.py`, `aim.py` | Separate experimental robot adapters; not required for the demo |
+| `test_*.py`, `test_data/` | Offline regressions and test fixtures |
+| `DEMO_VIDEO.md`, `DEMO.md` | Standalone recording guide and short presentation checklist |
+| `SUBMISSION.md` | Draft project description, Meta integration explanation and 90-second voiceover |
 
-## Privacy and safety
+## Privacy
 
-Recordings, the sound memory, your examples and the Meta usage log stay on this computer and are
-git-ignored. Captions run only with `--assist`, `--meta` or `--captions`.
+Local event metadata, saved audio/images, reference examples and the usage ledger are kept under
+recording/data directories and are git-ignored. Meta-enabled features upload selected input needed
+for that feature. **`--private` blocks camera-image uploads**; spectrogram images and requested
+speech audio can still be sent for labeling and transcription.
 
-- Pictures are never sent for speech-like sounds, and people are never outlined.
-- Faces in any picture that is sent are blurred first. This is best effort: OpenCV's face finder
-  can miss an angled or dim face, so a picture of the sound's spot can still show a person.
-- `--private` sends no pictures at all (labels and captions only).
-
-The arm is dry-run by default, moves slowly within fixed limits, and only after `live = true` and
-typing MOVE.
+Speech-like events skip camera enrichment, and recognized people are excluded from outlines.
+These checks are heuristic. Camera images selected for upload receive best-effort face blurring;
+angled or dim faces can be missed. Inspect the scene and choose private/local mode as appropriate.
+No saved audio plays automatically; replay is explicit with **E**.

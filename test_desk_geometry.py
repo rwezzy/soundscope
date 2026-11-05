@@ -16,21 +16,21 @@ class DeskGeometry(unittest.TestCase):
 
     def test_desk_positions_share_the_arm_base_frame(self):
         np.testing.assert_allclose(self.desk['camera']['base']['position_mm'], [-380, 740, 160])
-        np.testing.assert_allclose(self.desk['array']['position_mm'], [-376, 729, 288])
+        np.testing.assert_allclose(self.desk['array']['position_mm'], [-376, 729, 290])
         offset = np.asarray(self.desk['array']['position_mm']) - self.desk['camera']['base']['position_mm']
-        np.testing.assert_allclose(offset, [4, -11, 128])
+        np.testing.assert_allclose(offset, [4, -11, 130])
 
     def test_same_camera_points_have_same_acoustic_geometry_in_both_profiles(self):
         # Camera axes are right/down/forward. Translating the whole rig must not change
         # the microphone-to-scene distances used to compute acoustic time differences.
         camera_points = np.array([[0, 0, 1000], [180, -120, 450], [-280, 90, 1700],
-                                  [11, -128, 4]], dtype=float)
+                                  [11, -130, 4]], dtype=float)
         relative = []
         for cfg in (self.standalone, self.desk):
             base_points = aim.camera_to_base(camera_points, cfg)
             relative.append(aim.base_to_array(base_points, cfg))
         np.testing.assert_allclose(relative[0], relative[1], atol=1e-12)
-        np.testing.assert_allclose(relative[1][0], [-0.128, 0.011, 0.996], atol=1e-12)
+        np.testing.assert_allclose(relative[1][0], [-0.130, -0.011, 0.996], atol=1e-12)
         np.testing.assert_allclose(relative[1][-1], [0, 0, 0], atol=1e-12)
 
     def test_projection_of_sound_ray_is_invariant_under_rig_translation(self):
@@ -47,15 +47,15 @@ class DeskGeometry(unittest.TestCase):
         np.testing.assert_allclose(aim.array_to_camera([0, 0, 1], self.desk), [0, 0, 1], atol=1e-12)
 
     def test_mirrored_carrier_flips_only_array_y_and_keeps_direction_round_trip(self):
-        self.assertTrue(self.standalone['array']['mirror'])
-        self.assertTrue(self.desk['array']['mirror'])
-        normal = copy.deepcopy(self.desk)
-        normal['array']['mirror'] = False
+        self.assertFalse(self.standalone['array']['mirror'])
+        self.assertFalse(self.desk['array']['mirror'])
+        mirrored = copy.deepcopy(self.desk)
+        mirrored['array']['mirror'] = True
         direction_cam = np.array([0.3, -0.2, math.sqrt(0.87)])
-        a = aim.camera_to_array(direction_cam, normal)
-        b = aim.camera_to_array(direction_cam, self.desk)
+        a = aim.camera_to_array(direction_cam, self.desk)
+        b = aim.camera_to_array(direction_cam, mirrored)
         np.testing.assert_allclose(b, a * [1, -1, 1], atol=1e-12)
-        np.testing.assert_allclose(aim.array_to_camera(b, self.desk), direction_cam, atol=1e-12)
+        np.testing.assert_allclose(aim.array_to_camera(b, mirrored), direction_cam, atol=1e-12)
 
 
 class SoundGate(unittest.TestCase):

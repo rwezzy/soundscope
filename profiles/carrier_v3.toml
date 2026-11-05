@@ -6,6 +6,8 @@
 # z toward the scene). Orbbec's housing model is centred in x and y with its front glass at z = 11.35, and
 # the color lens sits 11 mm off centre. So from the color lens the board is about 128 mm up, 11 mm to the
 # lens's right (seen from behind) and a few mm forward. Shoe adjustment can move it a few mm: press C.
+# Updated physical setup: lower board edge about 80 mm above the lens plus a roughly 50 mm radius
+# puts the centre about 130 mm above the lens. Forward/right offsets remain CAD estimates.
 # Laid over arm_config.toml; safety settings stay there.
 
 [camera]
@@ -19,6 +21,6 @@ pitch_deg = 0                  # tripod tilted? put the angle here (- = down)
 [array]
 mount = "facing"               # board standing, LED side toward the scene
 cable_edge = "up"              # USB edge up
-mirror = true                 # carried over from working version 480d06c, tested with claps
-position_mm = [4, -11, 128]    # [forward, left, up] from the color lens
+mirror = false                # current physical orientation: USB up, LEDs toward the scene
+position_mm = [4, -11, 130]    # [forward, left, up] from the color lens
 front_yaw_deg = 0              # press C in scope.py --mount carrier_v3 to calibrate; it is saved here

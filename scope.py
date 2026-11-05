@@ -11,14 +11,15 @@
 
 Keys: V = voice command, L = last sounds, C = three-position calibration, Enter = apply,
 Esc = cancel, H = heat map, M = map colours, D = diagnostics, Space = pause,
-T = type a history question, S = evidence snapshot, Q = quit.
+T = type a history question, B = saved evidence, E = replay selected audio,
+Up/Down (or J/K) = select history, F = fullscreen, S = evidence snapshot, Q = quit.
 Voice: press V and say "find my keys", "follow the phone ringing", "stop", "show everything",
 "when did the phone ring?", "who is talking?" or "what was that?".
 
 Visible 3D points are scored against the four microphones. The support region is a
 candidate, not a confirmed source. A depth contour is available in diagnostics.
 Default mode makes no Meta requests (V asks only when pressed) and never moves the robot.
-Every heard sound is saved to the local sound memory (recordings/memory, git-ignored);
+Accepted sound events are saved to local sound memory with audio and a scene frame (git-ignored);
 `python soundscope.py search "..."` answers questions about it later. --no-memory turns that off.
 """
 import argparse
@@ -42,6 +43,9 @@ from calibration import CalibrationSession, wrap_deg
 from localization_quality import assess
 import scope_ui
 import sound_memory
+from event_evidence import EvidenceStore, EvidenceWriter
+import history_ui
+from history_controller import HistoryController
 from insight import ASSIST_WATCH, FEATURES, Enricher
 from meta_api import COMMAND_WORDS, ENV_FILE, Meta, MetaError, load_env
 
@@ -181,7 +185,8 @@ def make_view(ev, final, loc, depth_mm, k, cfg):
                 measured=bool(has_depth[i, j]))
     view['quality'], view['support_mask'] = assess(scores, fix)
     if final:
-        view['contour'] = outline(depth_mm, k, *view['spot'])
+        if view['quality']['state'] == 'candidate' and view['measured']:
+            view['contour'] = outline(depth_mm, k, *view['spot'])
         view['reach'] = aim.reach_check(aim.camera_to_base(points[i, j] * 1000.0, cfg), cfg)
     return view
 
@@ -594,6 +599,10 @@ def listen(events, stop, requests=None, threshold_db=0.5):
                 seconds = requests.get_nowait()
             except queue.Empty:
                 continue
+            if isinstance(seconds, dict) and seconds.get('action') == 'mute':
+                duration = max(0.0, min(12.0, float(seconds.get('seconds', 0))))
+                listener.mute_until = max(listener.mute_until, time.monotonic() + duration)
+                continue
             wav = listener.record_command(seconds)
             try:
                 events.put({'kind': 'voice', 'wav': wav}, timeout=1.0)
@@ -619,6 +628,24 @@ def newest_sound(reports, now, max_age=MAX_AGE_S):
     usable = [ev for ev in reports if ev.get('kind') in ('update', 'sound')
               and 0 <= now - ev.get('observed_at', -float('inf')) <= max_age]
     return max(usable, key=lambda ev: (ev['observed_at'], ev['kind'] == 'sound'), default=None)
+
+
+def exclude_playback(reports, intervals):
+    """Prevent our own replay from becoming another recorded sound or paid model request.
+
+    The listener is also muted; this parent-side gate covers queued reports and delayed finals.
+    Timestamps are capture times, so an event that straddles playback is excluded too.
+    """
+    accepted = []
+    for report in reports:
+        if report.get('kind') not in ('sound', 'update'):
+            accepted.append(report)
+            continue
+        end = report.get('clip_end_at', report.get('observed_at', 0.0))
+        start = report.get('onset_at', report.get('observed_at', end))
+        if not any(start <= b and end >= a for a, b in intervals):
+            accepted.append(report)
+    return accepted
 
 
 class TimedRecorder:
@@ -694,6 +721,9 @@ class Session:
             self.features -= {'context', 'outline'}
         self.names = [n.strip() for n in getattr(args, 'name', None) or [] if n.strip()]  # alert when said
         self.memory = sound_memory.Memory() if getattr(args, 'memory', False) else None
+        self.evidence_store = EvidenceStore(self.memory.folder / 'evidence' if self.memory is not None else None)
+        self.evidence_writer = EvidenceWriter(self.evidence_store) if self.memory is not None else None
+        self.search_results = None
         self.references = sound_memory.ReferenceBank() if self.memory is not None or self.features else None
         self.speakers = sound_memory.SpeakerMap()
         self.results = collections.deque()  # (record id, kind, payload) from the worker thread
@@ -774,7 +804,7 @@ class Session:
         if len(self.tracks) > 64:  # forget the oldest sounds' tracks
             self.tracks.pop(next(iter(self.tracks)))
 
-    def record(self, report, view, frame, outline=False, depth=None):
+    def record(self, report, view, frame, outline=False, depth=None, frame_at=None):
         """Save one finished sound and hand it to the Meta worker. Never raises into the viewer."""
         if not self.active or not sound_memory.worth_remembering(report.get('fix') or {}):
             return None
@@ -792,6 +822,20 @@ class Session:
                                            mode=self.mode, now=started)
             if self.memory is not None:
                 self.memory.add(rec)
+                if self.evidence_writer is not None and wav and frame is not None:
+                    try:
+                        queued = self.evidence_writer.submit(
+                            rec['id'], wav, frame,
+                            frame_at=time.monotonic() if frame_at is None else frame_at,
+                            event_observed_at=report.get('observed_at', time.monotonic()),
+                            event_onset_at=report.get('onset_at'),
+                            event_end_at=report.get('clip_end_at', report.get('observed_at')),
+                            geometry={'where': rec['where'], 'quality': rec.get('quality'),
+                                      'camera': self.cfg.get('camera'), 'array': self.cfg.get('array')})
+                        if not queued:
+                            self.memory.update(rec['id'], {'evidence_error': 'Evidence writer busy; no clip saved.'})
+                    except (ValueError, OSError) as exc:
+                        self.memory.update(rec['id'], {'evidence_error': str(exc)})
             self.event_records[report.get('event_id')] = rec['id']
             print(sound_memory.phrase(rec), flush=True)
             if self.enricher is not None:
@@ -835,9 +879,36 @@ class Session:
                               'pixel': small_pixel, 'scale': scale})
         view['outline_requested'] = True
 
+    def analyze_saved(self, record):
+        """Explicit analysis of real saved evidence, preserving its original event timestamp."""
+        if self.enricher is None or self.meta is None:
+            return 'Recorded evidence is available locally. Start with --meta to request model analysis.'
+        try:
+            frame, wav, metadata = self.evidence_store.load(record.get('evidence'))
+        except ValueError as exc:
+            return f'Cannot analyze this saved event: {exc}'
+        stored = self.memory.get(record['id']) if self.memory is not None else None
+        task = {'record': stored or {k: v for k, v in record.items() if not k.startswith('evidence_')},
+                'wav': wav, 'explicit': True, 'requested_at': time.time()}
+        pixel = (record.get('where') or {}).get('pixel')
+        original = metadata['original_image_size']
+        if pixel is not None and metadata.get('scene_valid') is True:
+            scale = frame.shape[1] / original[0]
+            scaled_pixel = (pixel[0] * scale, pixel[1] * scale)
+            if 'context' in self.features:
+                task['crop_jpeg'] = crop_jpeg(frame, scaled_pixel)
+            if 'outline' in self.features:
+                jpeg, size, small_pixel, extra_scale = frame_jpeg(frame, scaled_pixel)
+                task.update(outline=True, frame_jpeg=jpeg, frame_size=size, pixel=small_pixel,
+                            scale=scale * extra_scale)
+        self.enricher.submit(task)
+        return 'Analyzing this SAVED event with Meta within the session budget; its timestamp stays unchanged.'
+
     def drain(self, now):
         """Apply the worker's results to the screen; returns notices to show."""
         notes = []
+        if self.evidence_writer is not None:
+            self.apply_evidence(self.evidence_writer.drain())
         while self.results:
             rid, kind, payload = self.results.popleft()
             rec = self.memory.get(rid) if self.memory is not None else None
@@ -847,6 +918,8 @@ class Session:
                 pixel = 'late'  # still saved and printed, but no longer drawn on the live picture
             if kind == 'notice':
                 notes.append(str(payload))
+            elif kind == 'analysis_status':
+                self.ui['analysis_status'] = (rid, str(payload))
             elif kind == 'captions':
                 for turn in payload:
                     text = f"{turn['name']} ({turn['where']}): {turn['text']}"
@@ -926,21 +999,22 @@ class Session:
         question = (cmd.get('question') or '').strip() or text
         meta = self.meta if self.meta is not None else None
         result = sound_memory.search(question, self.memory, meta)
-        now = time.monotonic()
         for rec in result['matches']:
             print('  - ' + sound_memory.phrase(rec), flush=True)
-        if self.mode == 'tripod':  # the camera has not moved: show where those sounds happened
-            for rec in result['matches'][:3]:
-                pixel = (rec.get('where') or {}).get('pixel')
-                if pixel:
-                    when = sound_memory.ago(rec['epoch'], time.time())
-                    self.captions.append({'text': f'{sound_memory.what_it_was(rec)} here, {when}', 'pixel': pixel,
-                                          'until': now + 10.0, 'kind': 'recall'})
+        # Search results belong on their saved scene, not at old pixels on a new live frame.
+        self.search_results = (question, result)
         return result['answer']
+
+    def apply_evidence(self, completed):
+        if self.memory is not None:
+            for rid, artifact, error in completed:
+                self.memory.update(rid, {'evidence': artifact} if artifact else {'evidence_error': error})
 
     def close(self):
         if self.enricher is not None:
             self.enricher.stop()
+        if self.evidence_writer is not None:
+            self.apply_evidence(self.evidence_writer.close())
 
 
 def run(args, cfg):
@@ -983,6 +1057,40 @@ def run(args, cfg):
     displayed_viewport = None
     displayed = None
     search_text, search_worker = None, None
+    history = HistoryController(session.evidence_store)
+    history_action = None
+    fullscreen = getattr(args, 'fullscreen', False)
+    playback_until = 0.0
+    playback_intervals = collections.deque(maxlen=30)
+
+    def open_history():
+        records = list(reversed(session.memory.recent(100))) if session.memory is not None else []
+        history.open(records)
+        cal.active = False
+
+    def play_history():
+        nonlocal playback_until, view, latest
+        if time.monotonic() < playback_until:
+            history.status = 'Recorded audio is already playing.'
+            return
+        wav = history.selected_audio()
+        if not wav:
+            history.status = 'No saved audio for this event.'
+            return
+        try:
+            import sounddevice as sd
+            samples = sound_memory.wav_samples(wav)
+            duration = len(samples) / 16000.0
+            start = time.monotonic()
+            requests.put_nowait({'action': 'mute', 'seconds': duration + 1.0})
+            playback_until = start + duration + 1.0
+            playback_intervals.append((start, playback_until))
+            view, latest = None, None
+            # Event clips are normalized for analysis. Replay at modest amplitude.
+            sd.play(np.asarray(samples, np.float32) * 0.25, samplerate=16000, blocking=False)
+            history.status = 'Playing RECORDED audio; new sound events are paused during replay.'
+        except Exception as exc:
+            history.status = f'Could not play saved audio: {exc}'
 
     def ask_history(question):
         try:
@@ -994,7 +1102,10 @@ def run(args, cfg):
             say(ui, f'History search unavailable: {exc}')
 
     def on_mouse(event, x, y, flags, param):
-        nonlocal click
+        nonlocal click, history_action
+        if history.active and search_text is None and event == cv2.EVENT_LBUTTONDOWN:
+            history_action = history.handle_click(x, y, displayed_viewport or viewport)
+            return
         if cal.active and not paused and shape is not None and event == cv2.EVENT_LBUTTONDOWN:
             xy = scope_ui.canvas_to_frame(x, y, shape, viewport_size=displayed_viewport)
             if xy is not None and displayed is not None:
@@ -1040,6 +1151,8 @@ def run(args, cfg):
         loc = Localizer()
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL | cv2.WINDOW_FREERATIO)
         cv2.resizeWindow(WINDOW, *viewport)
+        if fullscreen:
+            cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.setMouseCallback(WINDOW, on_mouse)
         say(ui, ui['note'])
         started = last_frame_at = time.monotonic()
@@ -1049,7 +1162,7 @@ def run(args, cfg):
         recorder = TimedRecorder(args.record) if args.record else None
         while not (args.seconds and time.monotonic() - started > args.seconds):
             got = cam.read()
-            reports = list(pending(events))
+            reports = exclude_playback(list(pending(events)), playback_intervals)
             now = time.monotonic()  # includes callbacks posted while draining the queue
             if debug:
                 stats['loops'] += 1
@@ -1121,9 +1234,11 @@ def run(args, cfg):
                 for report in reports:  # every finished sound goes to memory, shown or not
                     if report.get('kind') != 'sound' or 'fix' not in report or not session.active:
                         continue
+                    if not sound_memory.worth_remembering(report['fix']):
+                        continue
                     shown = report is ev and view is not None and live
                     report_view = view if shown else make_view(report, True, loc, depth, k, cfg)
-                    rec = session.record(report, report_view, frame, depth=depth)
+                    rec = session.record(report, report_view, frame, depth=depth, frame_at=last_frame_at)
                     if rec is not None and shown:
                         view['record_id'] = rec['id']
                 if hunt['found'] is not None and not hunt['found'].get('outline_requested'):
@@ -1131,13 +1246,23 @@ def run(args, cfg):
             else:
                 frame, depth, k = held
             now = time.monotonic()  # include scoring work in freshness checks
-            export_target(target_writer, view, paused=paused, calibrating=cal.active, hunt=hunt, now=now)
+            export_target(target_writer, view, paused=paused or history.active, calibrating=cal.active, hunt=hunt, now=now)
             if cal.active and click is not None:
                 xy, clicked_event, clicked_depth, clicked_k, clicked_at = click
                 say(ui, cal.click(xy, clicked_event, clicked_depth, clicked_k, cfg, clicked_at))
                 click = None
             if displayed_viewport is not None:
                 viewport = window_viewport(viewport)
+            if session.search_results is not None:
+                question, result = session.search_results
+                session.search_results = None
+                history.open(result['matches'], query=question)
+                history.status = result['answer']
+                cal.active = False
+            if history_action is not None:
+                if history_action[0] == 'play':
+                    play_history()
+                history_action = None
             shown_view = hunt['found'] or view
             if session.outline is not None and shown_view is not None and \
                     session.outline[0] == shown_view.get('record_id'):
@@ -1151,14 +1276,34 @@ def run(args, cfg):
                        search_answer=(ui['search_answer'][0] if ui.get('search_answer') and
                                       now < ui['search_answer'][1] else None),
                        viewport_size=viewport, captions=session.captions,
+                       recent_events=(list(reversed(session.memory.recent(3))) if session.memory else []),
                        outlines=[poly for polys, _ in session.outlines for poly in polys],
                        alert=session.alert[0] if session.alert else None)
+            if history.active:
+                if ui.get('analysis_status') and history.events:
+                    rid, message = ui.pop('analysis_status')
+                    if history.events[history.selected].get('id') == rid:
+                        history.status = message
+                if session.memory is not None:
+                    # A clip or model result may finish while this history page is open.
+                    history.events = [session.memory.get(rec['id']) or rec for rec in history.events]
+                records = list(history.events)
+                if records:
+                    records[history.selected] = history.current()
+                out = history_ui.render_history(records, history.selected, viewport_size=viewport,
+                                                search_query=history.query,
+                                                search_result_count=len(records) if history.query else None,
+                                                status=history.status, search_text=search_text)
             cv2.imshow(WINDOW, out)
             displayed_viewport = viewport
             displayed = (latest, depth, dict(k))
             if recorder:
                 recorder.write(out, now)
-            key = cv2.waitKey(1) & 0xFF
+            raw_key = cv2.waitKeyEx(1)
+            key = raw_key & 0xFF
+            if search_text is None and history.active and raw_key in (2490368, 2621440, 65362, 65364):
+                history.next(-1 if raw_key in (2490368, 65362) else 1)
+                continue
             if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
             if search_text is not None:
@@ -1175,7 +1320,26 @@ def run(args, cfg):
                 key += ord('a') - ord('A')
             if key == ord('q') or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
-            if key == ord('v'):
+            if key == ord('f'):
+                fullscreen = not fullscreen
+                cv2.setWindowProperty(WINDOW, cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
+            elif key == ord('b'):
+                if history.active:
+                    history.active = False
+                else:
+                    open_history()
+            elif history.active and key == 27:
+                history.active = False
+            elif history.active and key in (ord('j'), ord('k'), 9):
+                history.next(-1 if key == ord('k') else 1)
+            elif history.active and key == ord('e'):
+                play_history()
+            elif history.active and key == ord('a'):
+                current = history.current()
+                if current:
+                    history.status = session.analyze_saved(current)
+            elif key == ord('v'):
                 try:
                     session.get_meta()
                     requests.put_nowait(4.0)
@@ -1184,7 +1348,7 @@ def run(args, cfg):
                     say(ui, f'Voice needs MODEL_API_KEY in meta-soundscope/.env: {exc}')
                 except queue.Full:
                     say(ui, 'Still recording the last command.')
-            elif key == ord('t'):
+            elif key in (ord('t'), ord('/')):
                 if search_worker is not None and search_worker.is_alive():
                     say(ui, 'Finishing the previous history search.')
                 else:
@@ -1195,7 +1359,7 @@ def run(args, cfg):
                 for rec in last:
                     print('  ' + sound_memory.phrase(rec), flush=True)
                 say(ui, sound_memory.phrase(last[-1]) if last else 'No sounds in memory yet.')
-            elif key == ord('c') and not paused:
+            elif key == ord('c') and not paused and not history.active:
                 say(ui, cal.start(cfg))
                 if target_writer:
                     target_writer.invalidate('Calibration active')
@@ -1239,6 +1403,12 @@ def run(args, cfg):
             except OSError as exc:
                 print(f'Target cleanup warning: {exc}', flush=True)
         session.close()
+        if playback_intervals:
+            try:
+                import sounddevice as sd
+                sd.stop()
+            except Exception:
+                pass
         stop.set()
         if process.pid is not None:
             process.join(timeout=3)
@@ -1273,6 +1443,7 @@ def main():
     p.add_argument('--watch', action='append', help='alert when this sound happens, e.g. --watch "phone ringing"')
     p.add_argument('--no-memory', dest='memory', action='store_false', help='do not save heard sounds')
     p.add_argument('--record', help='save the annotated video to this .mp4 file')
+    p.add_argument('--fullscreen', action='store_true', help='start fullscreen; F toggles it')
     p.add_argument('--seconds', type=float, help='stop after this long')
     p.add_argument('--diagnostics', action='store_true', help='show raw evidence metrics')
     p.add_argument('--no-heatmap', action='store_true', help='hide the acoustic overlay initially')

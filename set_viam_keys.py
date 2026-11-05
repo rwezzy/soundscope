@@ -28,7 +28,7 @@ def main():
             if not line.startswith(('VIAM_ADDRESS=', 'VIAM_API_KEY=', 'VIAM_API_KEY_ID='))]
     keep += [f'VIAM_ADDRESS={address}', f'VIAM_API_KEY={key}', f'VIAM_API_KEY_ID={key_id}']
     ENV.write_text('\n'.join(keep) + '\n', encoding='utf-8')
-    print(f'Saved to {ENV}. Now tell Claude: keys are in.')
+    print(f'Saved to {ENV}. Your local Viam connection settings are ready.')
 
 
 if __name__ == '__main__':

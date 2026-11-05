@@ -28,10 +28,12 @@ Audio must be 16 kHz mono 16-bit WAV. Needs MODEL_API_KEY in meta-soundscope/.en
 """
 import argparse
 import base64
+from contextlib import contextmanager
 import io
 import json
 import math
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -228,48 +230,183 @@ class BudgetError(MetaError):
     pass
 
 
+_BUDGET_LOCKS = {}
+_BUDGET_LOCKS_GUARD = threading.Lock()
+
+
+def _money(value):
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        raise BudgetError('Meta budget amounts must be finite and nonnegative')
+    return value
+
+
+class _Reservation:
+    """A held estimate; settle accepted work, release requests that fail before acceptance."""
+    def __init__(self, budget, token):
+        self.budget, self.token, self.closed = budget, token, False
+
+    def __enter__(self):
+        return self
+
+    def settle(self, usd):
+        if not self.closed:
+            usd = _money(usd)
+            # If saving accepted usage fails, retain the on-disk reservation.
+            # __exit__ must not refund work that the API already accepted.
+            self.closed = True
+            self.budget._finish(self.token, usd)
+
+    def release(self):
+        if not self.closed:
+            self.closed = True
+            self.budget._finish(self.token, None)
+
+    def __exit__(self, *_):
+        self.release()
+
+
 class Budget:
     """Estimated spend per day (saved to disk, shared by every SoundScope program) and per session.
 
-    check() refuses a call whose worst-case cost would cross either limit; spend() records the
-    cost the reply reports (token usage), or the worst case when it reports none.
+    reserve() atomically holds each estimated request cost across threads and processes.
+    Accepted work settles at reported usage; failed requests release their reservation.
+    Pending costs left by a crash remain held until the next day, conservatively.
+    Token estimates are approximate: this is not an exact cap on the provider's bill.
+    check()/spend() remain available for legacy callers, but HTTP paths use reservations.
     """
 
     def __init__(self, daily_usd=None, session_usd=None, path=None, today=None):
-        self.daily = float(daily_usd if daily_usd is not None else os.environ.get('META_DAILY_LIMIT_USD', 1.0))
-        self.session = float(session_usd if session_usd is not None else os.environ.get('META_SESSION_LIMIT_USD', 0.5))
+        self.daily = _money(daily_usd if daily_usd is not None else os.environ.get('META_DAILY_LIMIT_USD', 1.0))
+        self.session = _money(session_usd if session_usd is not None else os.environ.get('META_SESSION_LIMIT_USD', 0.5))
         self.path = Path(path or USAGE_FILE)
         self.today = today or (lambda: date.today().isoformat())
         self.session_spent, self.session_calls = 0.0, {}
-        self.lock = threading.Lock()
+        self._pending = {}
+        key = os.path.normcase(str(self.path.resolve()))
+        with _BUDGET_LOCKS_GUARD:
+            self.lock = _BUDGET_LOCKS.setdefault(key, threading.RLock())
+
+    @contextmanager
+    def _locked(self):
+        """Short ledger transaction; never held during a network request."""
+        with self.lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.path.with_name(self.path.name + '.lock')
+            with lock_path.open('a+b') as stream:
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b'0')
+                    stream.flush()
+                stream.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    acquire = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    release = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    acquire = lambda: fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    release = lambda: fcntl.flock(stream, fcntl.LOCK_UN)
+                deadline = time.monotonic() + 5.0
+                while True:
+                    try:
+                        acquire()
+                        break
+                    except OSError as exc:
+                        if time.monotonic() >= deadline:
+                            raise BudgetError('Meta usage ledger is busy; no request sent') from exc
+                        time.sleep(0.01)
+                try:
+                    yield
+                finally:
+                    release()
 
     def _load(self):
         try:
             data = json.loads(self.path.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             data = {}
+        except (OSError, ValueError) as exc:
+            raise BudgetError('Meta usage ledger is unreadable; refusing to reset the budget') from exc
+        if not isinstance(data, dict):
+            raise BudgetError('Meta usage ledger is malformed; refusing to reset the budget')
         if data.get('day') != self.today():
-            data = {'day': self.today(), 'spent': 0.0, 'calls': {}}
+            data = {'day': self.today(), 'spent': 0.0, 'calls': {}, 'reserved': {}}
+        try:
+            data['spent'] = _money(data['spent'])
+            data.setdefault('reserved', {})
+            if not isinstance(data['calls'], dict) or not isinstance(data['reserved'], dict):
+                raise ValueError('invalid counters')
+            for pending in data['reserved'].values():
+                _money(pending['usd'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BudgetError('Meta usage ledger is malformed; refusing to reset the budget') from exc
         return data
 
     def _save(self, data):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix('.tmp')
-        tmp.write_text(json.dumps(data, indent=1), encoding='utf-8')
-        os.replace(tmp, self.path)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.path.parent,
+                                             prefix=self.path.name + '.', suffix='.tmp', delete=False) as stream:
+                tmp = Path(stream.name)
+                json.dump(data, stream, indent=1, allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.path)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+
+    def _check(self, worst_usd, data):
+        pending_session = sum(item['usd'] for item in self._pending.values())
+        pending_day = sum(item['usd'] for item in data['reserved'].values())
+        if self.session_spent + pending_session + worst_usd > self.session + 1e-12:
+            raise BudgetError(f'session Meta budget reached (${self.session_spent:.3f} spent, '
+                              f'${pending_session:.3f} pending of ${self.session:.2f}); '
+                              'raise META_SESSION_LIMIT_USD to allow more')
+        if data['spent'] + pending_day + worst_usd > self.daily + 1e-12:
+            raise BudgetError(f'daily Meta budget reached (${data["spent"]:.3f} spent, '
+                              f'${pending_day:.3f} pending of ${self.daily:.2f} today); '
+                              'raise META_DAILY_LIMIT_USD to allow more')
 
     def check(self, worst_usd, kind):
-        with self.lock:
-            spent = self._load()['spent']
-            if self.session_spent + worst_usd > self.session:
-                raise BudgetError(f'session Meta budget reached (${self.session_spent:.3f} of ${self.session:.2f}); '
-                                  'raise META_SESSION_LIMIT_USD to allow more')
-            if spent + worst_usd > self.daily:
-                raise BudgetError(f'daily Meta budget reached (${spent:.3f} of ${self.daily:.2f} today); '
-                                  'raise META_DAILY_LIMIT_USD to allow more')
+        with self._locked():
+            self._check(_money(worst_usd), self._load())
+
+    def reserve(self, worst_usd, kind):
+        worst_usd = _money(worst_usd)
+        with self._locked():
+            data = self._load()
+            self._check(worst_usd, data)
+            token = uuid.uuid4().hex
+            entry = {'usd': worst_usd, 'kind': str(kind)}
+            data['reserved'][token] = entry
+            self._save(data)
+            self._pending[token] = entry
+        return _Reservation(self, token)
+
+    def _finish(self, token, actual_usd):
+        with self._locked():
+            entry = self._pending.get(token)
+            if entry is None:
+                return
+            data = self._load()
+            data['reserved'].pop(token, None)
+            if actual_usd is not None:
+                data['spent'] = round(data['spent'] + actual_usd, 9)
+                kind = entry['kind']
+                data['calls'][kind] = data['calls'].get(kind, 0) + 1
+            self._save(data)
+            self._pending.pop(token)
+            if actual_usd is not None:
+                self.session_spent += actual_usd
+                self.session_calls[kind] = self.session_calls.get(kind, 0) + 1
+            self._short = None
 
     def spend(self, usd, kind):
-        with self.lock:
+        usd = _money(usd)
+        with self._locked():
             data = self._load()
             data['spent'] = round(data['spent'] + usd, 6)
             data['calls'][kind] = data['calls'].get(kind, 0) + 1
@@ -278,18 +415,24 @@ class Budget:
             self.session_calls[kind] = self.session_calls.get(kind, 0) + 1
 
     def summary(self):
-        data = self._load()
-        return {'today_usd': round(data['spent'], 4), 'daily_limit_usd': self.daily,
-                'session_usd': round(self.session_spent, 4), 'session_limit_usd': self.session,
-                'calls_today': data['calls'], 'calls_session': dict(self.session_calls)}
+        with self._locked():
+            data = self._load()
+            return {'today_usd': round(data['spent'], 4), 'daily_limit_usd': self.daily,
+                    'session_usd': round(self.session_spent, 4), 'session_limit_usd': self.session,
+                    'pending_today_usd': round(sum(item['usd'] for item in data['reserved'].values()), 6),
+                    'pending_session_usd': round(sum(item['usd'] for item in self._pending.values()), 6),
+                    'calls_today': data['calls'], 'calls_session': dict(self.session_calls)}
 
     def short(self):
         """One-line spend for the screen; re-read at most every 2 s (the viewer asks every frame)."""
         now = time.monotonic()
-        if not hasattr(self, '_short') or now - self._short[0] > 2.0:
+        cached = getattr(self, '_short', None)
+        if not cached or now - cached[0] > 2.0:
             s = self.summary()
-            self._short = (now, f"Meta ${s['today_usd']:.2f}/{s['daily_limit_usd']:.2f} today")
-        return self._short[1]
+            pending = f" (+${s['pending_today_usd']:.3f} pending)" if s['pending_today_usd'] else ''
+            cached = (now, f"Meta ${s['today_usd']:.2f}/{s['daily_limit_usd']:.2f} today{pending}")
+            self._short = cached
+        return cached[1]  # another thread can invalidate self._short during settlement
 
 
 def _text_tokens(content):
@@ -347,7 +490,6 @@ class Meta:
     def _asr(self, wav, mode, keywords=None):
         seconds = wav_seconds(wav)
         cost = PRICES.get(self.asr_model, {}).get('audio_hour', 0.18) * max(seconds, 1.0) / 3600
-        self.budget.check(cost, 'transcribe')
         settings = {'model': self.asr_model, 'mode': mode, 'audioEncoding': 'WAV'}
         if keywords:
             settings['keywords'] = list(keywords)[:20]
@@ -356,8 +498,9 @@ class Meta:
                 f'Content-Type: application/json\r\n\r\n{json.dumps(settings)}\r\n'
                 f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; filename="clip.wav"\r\n'
                 'Content-Type: audio/wav\r\n\r\n').encode() + wav + f'\r\n--{boundary}--\r\n'.encode()
-        result = self._post('/asr/transcribe', body, 'multipart/form-data; boundary=' + boundary)
-        self.budget.spend(cost, 'transcribe')  # failed requests are not billed
+        with self.budget.reserve(cost, 'transcribe') as ticket:
+            result = self._post('/asr/transcribe', body, 'multipart/form-data; boundary=' + boundary)
+            ticket.settle(cost)
         if not isinstance(result, dict) or not isinstance(result.get('transcript'), str):
             raise MetaError('no transcript in the reply')
         return result
@@ -391,19 +534,22 @@ class Meta:
         price = PRICES.get(model, PRICES['muse-spark-1.3'])
         tokens_in = _text_tokens(content) + (_text_tokens(system) if system else 0)
         worst = tokens_in * price['input'] + max_tokens * price['output']
-        self.budget.check(worst, kind)
         messages = ([{'role': 'system', 'content': system}] if system else []) + [{'role': 'user', 'content': content}]
         payload = {'model': model, 'messages': messages, 'max_tokens': max_tokens,
                    'reasoning_effort': os.environ.get('META_REASONING_EFFORT') or effort,
                    'response_format': {'type': 'json_schema',
                                        'json_schema': {'name': name, 'strict': True, 'schema': schema}}}
-        result = self._post('/chat/completions', json.dumps(payload).encode())
-        cost = worst  # failed requests are not billed; answered ones cost what the reply reports
-        usage = result.get('usage') if isinstance(result, dict) else None
-        if isinstance(usage, dict) and 'prompt_tokens' in usage:
-            cost = (usage.get('prompt_tokens', 0) * price['input']
-                    + usage.get('completion_tokens', 0) * price['output'])
-        self.budget.spend(cost, kind)
+        with self.budget.reserve(worst, kind) as ticket:
+            result = self._post('/chat/completions', json.dumps(payload).encode())
+            cost = worst  # an accepted reply is charged even if its content is malformed
+            usage = result.get('usage') if isinstance(result, dict) else None
+            if isinstance(usage, dict) and 'prompt_tokens' in usage:
+                try:
+                    cost = (_money(usage.get('prompt_tokens', 0)) * price['input']
+                            + _money(usage.get('completion_tokens', 0)) * price['output'])
+                except (TypeError, ValueError, BudgetError):
+                    pass  # malformed usage retains the reserved estimate
+            ticket.settle(cost)
         try:
             if result['choices'][0].get('finish_reason') == 'length':
                 raise MetaError('Muse Spark ran out of tokens before answering; raise max_tokens')
@@ -484,24 +630,24 @@ class Meta:
         """SAM 3.1 with one positive point at the pixel the sound picked -> list of polygons
         (each an (N, 2) int array in image pixels) whose mask contains that pixel."""
         cost = PRICES.get(self.sam_model, {}).get('image', 0.0025)
-        self.budget.check(cost, 'outline')
         prompt = sam_point_prompt(width, height, u, v)
         payload = {'model': self.sam_model, 'stream': True,
                    'input': [{'type': 'message', 'role': 'user',
                               'content': [{'type': 'input_text', 'text': prompt},
                                           {'type': 'input_image', 'image_url': jpeg_data_url(jpeg)}]}]}
         text = []
-        with self._open('/responses', json.dumps(payload).encode(), 'application/json',
-                        'text/event-stream', timeout) as response:
-            self.budget.spend(cost, 'outline')  # accepted: billed per image
-            for event in sse_events(response):
-                kind = event.get('type', '')
-                if kind == 'response.output_text.delta':
-                    text.append(event.get('delta', ''))
-                elif kind in ('response.failed', 'error'):
-                    raise MetaError(f'SAM 3.1 failed: {event.get("error") or event}')
-                elif kind == 'response.completed':
-                    break
+        with self.budget.reserve(cost, 'outline') as ticket:
+            with self._open('/responses', json.dumps(payload).encode(), 'application/json',
+                            'text/event-stream', timeout) as response:
+                ticket.settle(cost)  # accepted: billed once per image, even if streaming later fails
+                for event in sse_events(response):
+                    kind = event.get('type', '')
+                    if kind == 'response.output_text.delta':
+                        text.append(event.get('delta', ''))
+                    elif kind in ('response.failed', 'error'):
+                        raise MetaError(f'SAM 3.1 failed: {event.get("error") or event}')
+                    elif kind == 'response.completed':
+                        break
         return sam_polygons(''.join(text), u, v)
 
 

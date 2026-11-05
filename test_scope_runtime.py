@@ -229,6 +229,7 @@ class LiveLoopSmoke(unittest.TestCase):
                 patches.enter_context(patch.object(scope.cv2, name))
             destroyed = patches.enter_context(patch.object(scope.cv2, 'destroyAllWindows'))
             patches.enter_context(patch.object(scope.cv2, 'waitKey', return_value=ord('q')))
+            patches.enter_context(patch.object(scope.cv2, 'waitKeyEx', return_value=ord('q')))
             patches.enter_context(patch.object(scope.cv2, 'getWindowProperty', return_value=1))
             patches.enter_context(patch('builtins.print'))
             scope.run(args, cfg)

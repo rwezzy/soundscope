@@ -6,3 +6,6 @@ __pycache__/
 # Your own example sounds (enroll) can capture voices and rooms too.
 references/
 *.toml.tmp
+# Local QA renders and temporary diagnostics; never submission evidence.
+tmp/
+test_data/palette_preview/

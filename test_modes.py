@@ -198,7 +198,8 @@ class Viewer(unittest.TestCase):
             session.captions.clear()
             session.ask({'action': 'search', 'question': 'what happened in the last minute'}, '')
             recall = [c for c in session.captions if c['kind'] == 'recall']
-            self.assertEqual(recall[0]['pixel'], [60, 40])  # shown where it happened
+            self.assertEqual(recall, [])  # historical pixels must not appear on the current live image
+            self.assertEqual(session.search_results[1]['matches'][0]['where']['pixel'], [60, 40])
             session.close()
 
     def test_night_mode_sends_depth_shapes_instead_of_a_black_crop(self):

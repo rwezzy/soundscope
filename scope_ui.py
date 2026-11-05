@@ -9,10 +9,15 @@ confidence percentage.  Depth describes a candidate visible surface only.
 from dataclasses import dataclass
 from functools import lru_cache
 import math
+import os
 import time
 
 import cv2
 import numpy as np
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # retain the OpenCV fallback on a minimal installation
+    Image = ImageDraw = ImageFont = None
 
 
 # All colors are BGR. A restrained palette keeps camera detail readable.
@@ -116,20 +121,90 @@ def _number(value, default=None):
 
 
 def _clean(value):
-    # Hershey fonts do not support Unicode. Never render replacement glyphs.
-    return str(value).replace('\n', ' ').encode('ascii', 'replace').decode('ascii')
+    return str(value).replace('\r', ' ').replace('\n', ' ')
+
+
+# Text is drawn with a real typeface (Segoe UI on Windows, DejaVu elsewhere) through PIL, cached
+# per string; OpenCV's Hershey font is only a fallback when no font file is found.
+_FONT_DIRS = (os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts'), '/usr/share/fonts/truetype/dejavu',
+              '/Library/Fonts', '/System/Library/Fonts/Supplemental')
+_FACES = {False: ('segoeui.ttf', 'DejaVuSans.ttf', 'Arial.ttf', 'arial.ttf'),
+          True: ('seguisb.ttf', 'DejaVuSans-Bold.ttf', 'Arial Bold.ttf', 'arialbd.ttf')}
+
+
+@lru_cache(maxsize=64)
+def _font(px, bold):
+    if ImageFont is None:
+        return None
+    for name in _FACES[bool(bold)]:
+        for folder in _FONT_DIRS:
+            path = os.path.join(folder, name)
+            if os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, px)
+                except OSError:
+                    continue
+    return None
+
+
+def _px(scale):
+    return max(8, int(round(scale * 32)))
+
+
+@lru_cache(maxsize=2048)
+def _glyphs(text, px, bold):
+    """An anti-aliased coverage mask of the text and the row of its baseline."""
+    font = _font(px, bold)
+    ascent, descent = font.getmetrics()
+    width = int(math.ceil(font.getlength(text))) + 4
+    image = Image.new('L', (max(1, width), ascent + descent + 4), 0)
+    ImageDraw.Draw(image).text((2, 2), text, font=font, fill=255)
+    return np.asarray(image), ascent + 2
+
+
+def _width(text, scale, bold=False):
+    text = _clean(text)
+    font = _font(_px(scale), bold)
+    if font is None:
+        return cv2.getTextSize(text.encode('ascii', 'replace').decode('ascii'), cv2.FONT_HERSHEY_SIMPLEX,
+                               scale, 2 if bold else 1)[0][0]
+    return int(math.ceil(font.getlength(text)))
 
 
 def _text(img, text, x, y, scale=0.5, color=TEXT, thickness=1):
-    cv2.putText(img, _clean(text), (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX,
-                scale, color, thickness, cv2.LINE_AA)
-
-
-def _fit(text, width, scale):
+    """Draw text with its baseline at y (like cv2.putText). thickness >= 2 means semibold."""
     text = _clean(text)
-    while text and cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)[0][0] > width:
-        text = text[:-1]
-    return text
+    if not text:
+        return
+    bold = thickness >= 2
+    font = _font(_px(scale), bold)
+    if font is None:
+        cv2.putText(img, text.encode('ascii', 'replace').decode('ascii'), (int(x), int(y)),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+        return
+    mask, base = _glyphs(text, _px(scale), bold)
+    x0, y0 = int(x) - 2, int(y) - base
+    h, w = mask.shape
+    ix0, iy0, ix1, iy1 = max(0, x0), max(0, y0), min(img.shape[1], x0 + w), min(img.shape[0], y0 + h)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return
+    a = mask[iy0 - y0:iy1 - y0, ix0 - x0:ix1 - x0].astype(np.float32)[..., None] / 255.0
+    roi = img[iy0:iy1, ix0:ix1]
+    roi[:] = (roi * (1 - a) + np.asarray(color, np.float32) * a + 0.5).astype(np.uint8)
+
+
+def _fit(text, width, scale, bold=False):
+    text = _clean(text)
+    if _width(text, scale, bold) <= width:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:  # longest prefix that fits with an ellipsis
+        mid = (lo + hi + 1) // 2
+        if _width(text[:mid].rstrip() + '\u2026', scale, bold) <= width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + '\u2026' if lo else ''
 
 
 def _wrap(text, width, scale, limit=3):
@@ -137,7 +212,7 @@ def _wrap(text, width, scale, limit=3):
     lines, line = [], ''
     for word in words:
         proposed = f'{line} {word}'.strip()
-        if line and cv2.getTextSize(proposed, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)[0][0] > width:
+        if line and _width(proposed, scale) > width:
             lines.append(line)
             line = word
         else:
@@ -146,7 +221,7 @@ def _wrap(text, width, scale, limit=3):
         lines.append(line)
     if len(lines) > limit:
         lines = lines[:limit]
-        lines[-1] = _fit(lines[-1], width - 18, scale) + '...'
+        lines[-1] = _fit(lines[-1] + ' \u2026\u2026', width, scale)
     return [_fit(line, width, scale) for line in lines]
 
 
@@ -341,7 +416,7 @@ def _alert_banner(image, text):
 def _captions(image, captions, scale):
     """Caption bubbles near the pixel each sound came from (bottom center when off screen)."""
     h, w = image.shape[:2]
-    stack = {}
+    placed = []
     for cap in captions or ():
         text = _clean(cap.get('text', ''))[:140]
         if not text:
@@ -349,7 +424,7 @@ def _captions(image, captions, scale):
         size = 0.5 * max(0.6, scale)
         lines = _wrap(text, int(w * 0.5), size, 2)
         line_h = int(22 * max(0.6, scale))
-        box_w = max(cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, size, 1)[0][0] for line in lines) + 16
+        box_w = max(_width(line, size) for line in lines) + 16
         box_h = line_h * len(lines) + 10
         pixel = cap.get('pixel')
         if pixel is not None:
@@ -357,10 +432,26 @@ def _captions(image, captions, scale):
             x, y = u - box_w // 2, v - box_h - int(30 * scale)
         else:
             x, y = (w - box_w) // 2, h - box_h - 12
-        key = (x // 40, y // 40)
-        y -= stack.get(key, 0)
-        stack[key] = stack.get(key, 0) + box_h + 6
         x, y = int(np.clip(x, 4, max(4, w - box_w - 4))), int(np.clip(y, 4, max(4, h - box_h - 4)))
+        # Search above/below existing bubbles, rather than grouping only nearby
+        # anchor pixels. When the picture is full, omit a bubble instead of
+        # drawing overlapping, unreadable text.
+        candidates = [y, 4, h - box_h - 4]
+        for bx, by, bw, bh in placed:
+            candidates.extend((by - box_h - 6, by + bh + 6))
+        found = None
+        for candidate in sorted(set(candidates), key=lambda yy: abs(yy - y)):
+            if candidate < 4 or candidate + box_h > h - 4:
+                continue
+            if not any(x < bx + bw + 6 and bx < x + box_w + 6
+                       and candidate < by + bh + 6 and by < candidate + box_h + 6
+                       for bx, by, bw, bh in placed):
+                found = candidate
+                break
+        if found is None:
+            continue
+        y = found
+        placed.append((x, y, box_w, box_h))
         overlay = image.copy()
         _round_rect(overlay, (x, y, box_w, box_h), PANEL, 8)
         cv2.addWeighted(overlay, 0.82, image, 0.18, 0, dst=image)
@@ -385,11 +476,42 @@ def _sparkline(img, view, rect, color):
     cv2.polylines(img, [pts], False, color, 1, cv2.LINE_AA)
 
 
+def _view_bearing(view):
+    """Candidate camera-relative bearing, never a compass/north measurement."""
+    off = view.get('off_screen')
+    if off:
+        try:
+            edge, value = off
+            angle = _number(value)
+            return (-abs(angle) if edge == 'left' else abs(angle) if edge == 'right' else None) if angle is not None else None
+        except (ValueError, TypeError):
+            return None
+    try:
+        point = np.asarray(view.get('point'), dtype=float)
+        if point.shape == (3,) and np.isfinite(point).all() and point[2] > 0:
+            return math.degrees(math.atan2(point[0], point[2]))
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _bearing_dial(image, center, radius, angle, color=CYAN):
+    cx, cy = center
+    cv2.circle(image, center, radius, LINE, 1, cv2.LINE_AA)
+    cv2.circle(image, center, max(2, radius // 2), LINE, 1, cv2.LINE_AA)
+    k = max(2, radius // 8)
+    cv2.fillConvexPoly(image, np.array([[cx, cy - k - 2], [cx - k, cy + k], [cx + k, cy + k]], np.int32), MUTED)
+    if angle is not None:
+        radians = math.radians(angle)
+        tip = (round(cx + radius * .88 * math.sin(radians)), round(cy - radius * .88 * math.cos(radians)))
+        cv2.arrowedLine(image, center, tip, color, max(1, radius // 15), cv2.LINE_AA, tipLength=.25)
+
+
 def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None,
            heatmap=True, diagnostics=False, paused=False, calibration_active=False,
            viewport_size=None, status=None, captions=(), outlines=(), alert=None,
            heatmap_palette='amber', heatmap_opacity=0.44, search_text=None,
-           search_answer=None):
+           search_answer=None, recent_events=()):
     """Return a BGR dashboard without modifying ``frame`` or ``view``.
 
     ``now`` and ``view['time']`` use the same monotonic clock. Both final and live
@@ -445,7 +567,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     mode = ('CALIBRATION' if calibration_active else 'HEATMAP OFF' if not heatmap
             else 'HEATMAP / WEAK EVIDENCE' if state == 'WEAK'
             else 'HEATMAP / RELATIVE EVIDENCE')
-    mode_width = cv2.getTextSize(mode, cv2.FONT_HERSHEY_SIMPLEX, 0.34 * s, 1)[0][0]
+    mode_width = _width(mode, 0.34 * s)
     _text(out, mode, p(24) + layout.main_width - mode_width - p(6), p(114), 0.34 * s,
           AMBER if calibration_active else MUTED)
     camera = frame.copy()
@@ -497,8 +619,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
         available = layout.main_width - p(32)
         clipped = False
         # Keep the insertion point visible when a query exceeds the field width.
-        while query and cv2.getTextSize(('... ' if clipped else '') + query + ' |',
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.43 * s, 1)[0][0] > available:
+        while query and _width(('... ' if clipped else '') + query + ' |', 0.43 * s) > available:
             query, clipped = query[1:], True
         shown = ('... ' if clipped else '') + query + ' |' if query else 'Type a sound or description...'
         _text(out, shown, p(30), note_y + p(45), 0.43 * s, TEXT if query else MUTED)
@@ -515,8 +636,11 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     card(92, 140, 'LOCALIZATION')
     cv2.circle(out, (sx + p(21), p(144)), p(4), color, -1, cv2.LINE_AA)
     _text(out, state, sx + p(34), p(152), 0.68 * s, color, max(1, p(2)))
-    for i, line in enumerate(_wrap(reason, sw - p(36), 0.4 * s, 3)):
+    for i, line in enumerate(_wrap(reason, sw - p(112), 0.4 * s, 3)):
         _text(out, line, sx + p(18), p(179 + i * 18), 0.4 * s, MUTED)
+    bearing = _view_bearing(view) if state == 'CANDIDATE' else None
+    _bearing_dial(out, (sx + sw - p(49), p(184)), p(30), bearing, color)
+    _text(out, 'camera bearing', sx + sw - p(90), p(225), .22 * s, MUTED)
 
     card(246, 174, 'ACOUSTIC EVIDENCE')
     fix = view.get('fix') or {}
@@ -532,7 +656,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     for i, (label, value) in enumerate(rows):
         yy = p(295 + i * 25)
         _text(out, label, sx + p(18), yy, 0.4 * s, MUTED)
-        text_width = cv2.getTextSize(value, cv2.FONT_HERSHEY_SIMPLEX, 0.44 * s, 1)[0][0]
+        text_width = _width(value, 0.44 * s)
         _text(out, value, sx + sw - p(18) - text_width, yy, 0.44 * s, TEXT)
     if fresh:
         _sparkline(out, view, (sx + p(18), p(369), sw - p(36), p(23)), color)
@@ -553,15 +677,26 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
     _text(out, 'Depth unavailable' if fresh and distance is None else 'Sound-source depth is unconfirmed.',
           sx + p(18), p(546), 0.31 * s, MUTED)
 
-    card(574, 88, 'EVENT AGE')
-    _text(out, f'{age:.1f} s' if age is not None else '--', sx + p(18), p(628), 0.64 * s,
-          AMBER if state == 'STALE' else TEXT)
-    phase = 'expired' if state == 'STALE' else 'completed sound' if view.get('final') else 'live estimate' if view else 'awaiting audio'
-    _text(out, phase, sx + p(120), p(626), 0.35 * s, MUTED)
-    bar_x, bar_w = sx + p(18), sw - p(36)
-    cv2.line(out, (bar_x, p(646)), (bar_x + bar_w, p(646)), LINE, max(1, p(2)))
-    if age is not None and age <= expiry and expiry > 0:
-        cv2.line(out, (bar_x, p(646)), (bar_x + int(bar_w * (1 - age / expiry)), p(646)), color, max(1, p(2)))
+    if recent_events:
+        card(574, 88, 'RECENT EVENTS / B TO BROWSE')
+        for i, event in enumerate(tuple(recent_events)[:3]):
+            sound = event.get('sound') or {}
+            title = sound.get('label') or sound.get('local_label') or ('Speech' if event.get('speech') else '')
+            title = title or (event.get('acoustic') or {}).get('character') or 'Unidentified sound'
+            stamp = str(event.get('time') or '')
+            stamp = stamp[11:19] if len(stamp) >= 19 else '--:--:--'
+            _text(out, stamp, sx + p(18), p(615 + i * 18), .29 * s, MUTED)
+            _text(out, _fit(title, sw - p(110), .32 * s), sx + p(90), p(615 + i * 18), .32 * s, TEXT)
+    else:
+        card(574, 88, 'EVENT AGE')
+        _text(out, f'{age:.1f} s' if age is not None else '--', sx + p(18), p(628), 0.64 * s,
+              AMBER if state == 'STALE' else TEXT)
+        phase = 'expired' if state == 'STALE' else 'completed sound' if view.get('final') else 'live estimate' if view else 'awaiting audio'
+        _text(out, phase, sx + p(120), p(626), 0.35 * s, MUTED)
+        bar_x, bar_w = sx + p(18), sw - p(36)
+        cv2.line(out, (bar_x, p(646)), (bar_x + bar_w, p(646)), LINE, max(1, p(2)))
+        if age is not None and age <= expiry and expiry > 0:
+            cv2.line(out, (bar_x, p(646)), (bar_x + int(bar_w * (1 - age / expiry)), p(646)), color, max(1, p(2)))
 
     # Target verification is descriptive; it never becomes a localization score.
     lower_y = layout.height - p(67) if layout.compact else max(note_y + p(94), p(662)) + p(22)
@@ -583,16 +718,18 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
              if searching else
              [('ENTER', 'apply'), ('ESC', 'cancel'), ('C', 'restart'), ('H', 'heatmap'), ('S', 'snapshot'), ('Q', 'quit')]
              if calibration_active else
-             [('V', 'voice'), ('T', 'search'), ('L', 'last sounds'), ('C', 'calibrate'), ('H', 'heatmap'), ('M', 'colors'), ('D', 'diagnostics'),
-              ('SPACE', 'resume' if paused else 'pause'), ('S', 'snapshot'), ('Q', 'quit')])
+             [('V', 'voice'), ('T', 'search'), ('B', 'history'), ('L', 'last sounds'), ('C', 'calibrate'), ('H', 'heatmap'), ('M', 'colors'), ('D', 'diagnostics'),
+              ('SPACE', 'resume' if paused else 'pause'), ('S', 'snapshot'), ('F', 'full screen'), ('Q', 'quit')])
     cursor = p(24)
     for key, action in hints:
-        key_width = cv2.getTextSize(key, cv2.FONT_HERSHEY_SIMPLEX, 0.32 * s, 1)[0][0] + p(12)
+        key_width = _width(key, 0.32 * s) + p(12)
+        if cursor + key_width + p(7) + _width(action, 0.34 * s) > layout.width - p(24):
+            break
         _round_rect(out, (cursor, footer_y + p(17), key_width, p(22)), PANEL, p(4))
         _text(out, key, cursor + p(6), footer_y + p(32), 0.32 * s, TEXT)
         cursor += key_width + p(7)
         _text(out, action, cursor, footer_y + p(32), 0.34 * s, MUTED)
-        cursor += cv2.getTextSize(action, cv2.FONT_HERSHEY_SIMPLEX, 0.34 * s, 1)[0][0] + p(19)
+        cursor += _width(action, 0.34 * s) + p(19)
     fps_value = _number(fps)
     if fps_value is not None and layout.width - cursor > p(90):
         _text(out, f'{max(0, fps_value):.1f} FPS', layout.width - p(98), footer_y + p(32), 0.36 * s, MUTED)
@@ -605,7 +742,7 @@ def render(frame, view, target, note, *, now=None, fps=None, depth_coverage=None
                 f'SRP {peak:.3f}' if peak is not None else 'SRP --',
                 f'depth coverage {np.clip(depth, 0, 1) * 100:.0f}%' if depth is not None else 'depth coverage --',
                 'gray outline = depth surface']
-        heading_width = cv2.getTextSize(notes_heading, cv2.FONT_HERSHEY_SIMPLEX, 0.34 * s, 1)[0][0]
+        heading_width = _width(notes_heading, 0.34 * s)
         diag_x = p(30) + heading_width + p(24) if layout.compact else p(30)
         diag_y = note_y + p(22 if layout.compact else 81)
         _text(out, _fit('  |  '.join(info), layout.main_width - diag_x, 0.29 * s), diag_x, diag_y, 0.29 * s, CYAN)

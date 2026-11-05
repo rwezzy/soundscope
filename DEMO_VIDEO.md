@@ -1,66 +1,100 @@
 # Standalone submission video
 
-Use the Gemini 2 and reSpeaker on their fixed holder. This demo does not connect to the robot.
-Keep the stand still throughout the take so saved sound positions refer to the same scene.
+**Story: a sound happened, you missed it, and now you can ask what happened and inspect the evidence.**
+Use the Gemini 2 and reSpeaker on their fixed holder. The robot is not part of this take.
+Keep the sensors still so the sound map and saved scene share a consistent reference frame.
 
-## Start
+## Start a separate take
 
-Open PowerShell in this folder. For a free rehearsal:
+Open PowerShell in this folder. Free rehearsal:
 
 ```powershell
 .\demo.ps1 -Record
 ```
 
-For the real take with sound labels, nearby visual context, captions and eligible SAM outlines:
+Meta-enabled take, with the project's existing key file:
 
 ```powershell
-.\demo.ps1 -UseMeta -Record -EnvFile 'C:\Users\danny\Developer\hackathons-fall-2026\meta-soundscope\.env'
+.\demo.ps1 -UseMeta -Record -EnvFile '.env'
 ```
 
-Each launch creates a separate history without deleting previous recordings. The Meta take uses
-an estimated $0.20 session limit and $1 daily limit. Free rehearsal sets both to zero. The key file
-is read locally; its contents are not copied. Press Q to close the recording cleanly.
+Use the actual path to your existing `.env` if it is elsewhere. Do not put a key into the command
+or show the file in the recording. Each launch creates a separate history without deleting earlier
+takes. The key file is read locally; its contents are not copied.
 
-The built-in MP4 is **silent**. Film a wide shot with your phone, or use a screen recorder with
-microphone capture, to include the actual ringtone and narration. Do not put a prerecorded successful
-overlay over an unrelated sound. Cuts between real tests are fine; preserve the actual results.
+The Meta take sets an **estimated $0.20 session limit and $1 daily limit**. Free rehearsal sets both
+to zero. Pending requests reserve part of that allowance; the estimate is not a guaranteed provider
+billing cap. If credits are exhausted, demonstrate local localization and existing evidence rather
+than increasing the cap during a take.
 
-## 75–90 second sequence
+The built-in MP4 is **silent**. Capture a phone wide shot or screen-recorder microphone track for the
+real sounds and narration. Separately, event history can save the actual captured **WAV audio and a
+scene JPEG**. A JPEG is a still frame; the event browser does not promise a recorded video clip.
+Press **Q** to close and finish saving cleanly.
 
-1. **0–10 s: problem and rig.** Show the camera and four microphones. Say: “A sound can matter even
-   when you miss it. SoundScope shows where sounds may be coming from and lets you ask what happened.”
-2. **10–25 s: live localization.** Make two separate sounds at visible left and right positions. Show
-   the live acoustic overlay. Press M once to show another palette. Say: “The microphones measure the
-   direction. The camera provides visible surfaces and depth; the colour shows acoustic agreement.”
-3. **25–45 s: phone ring.** Put a visible phone or Bluetooth speaker at one position and play a ringtone
-   for 3–5 seconds. Stop and leave it still while the label arrives. Say: “Meta adds a likely sound
-   label and nearby visual context to the measured event.” If the label is wrong, retry honestly;
-   don't present it as a successful identification.
-4. **45–65 s: search.** Press T, type `When did my phone ring?`, then Enter. Show the history result
-   and remembered position. Say: “I can ask about past sounds, with their recorded time and location.”
-   Optional: press V and ask the same question aloud; allow time for transcription and the answer.
-5. **65–85 s: distinction and close.** Say: “The localization runs locally. Muse Spark helps interpret
-   and retrieve events; Muse Voice Transcribe handles speech; SAM outlines a candidate when sound and
-   image evidence agree. The robot is an optional future application of the same spatial output.”
+## Prepare the scene
 
-Use only features actually visible in your recording. An outline or caption is optional; don't spend
-the deadline waiting for every model to appear in one take. Allow roughly 5–15 seconds for a model
-result, but actual latency varies. The recording can be cut for length without changing the outcome.
+1. Use `carrier_v3` only with the actual matching assembly: board upright, USB edge up, LED side
+   toward the scene, centre about 13 cm above the color lens. Its current profile has **mirror=false**.
+2. Keep the camera/microphone holder stable. Check actual sounds at left, centre and right. If the
+   horizontal alignment is wrong, **C** collects three positions and **Enter** saves yaw. This does
+   not calibrate every offset, tilt or depth error.
+3. Put a visible phone or Bluetooth speaker to one side. Leave several ordinary objects stationary
+   in view. Keep this first demonstration free of overlapping sounds and hidden-source claims.
+4. Press **F** for fullscreen. Pick a readable palette with **M**. Ensure the source, overlay, event
+   labels and text are visible in the recording. Use the phone wide shot to show the physical rig.
+5. Rehearse one genuine ringtone event and inspect it with **B**. Confirm the saved scene and audio
+   exist before relying on them in the presentation. Missing evidence must remain labelled missing.
 
-## Controls
+The decisive contrast is **same visible scene, different sound direction**. Show the map responding
+to the sound starting, changing location and stopping, rather than suggesting that a recognizable
+phone in the picture caused the program to choose it.
 
-- M: cycle amber, turbo, inferno, viridis, plasma. H: show/hide the heatmap.
-- T: type a history question. Enter submits; Esc cancels. Questions are local unless a Meta session
-  is enabled; Meta failure falls back to local retrieval.
-- V: record a spoken command. L: last remembered sound. S: evidence snapshot. Q: finish.
-- C: three-position calibration. Only change calibration if left/right is wrong; the imported ring
-  profile includes the working version's mirrored orientation. Saving yaw does not calibrate all geometry.
+## 90-second sequence
 
-## Claims to keep accurate
+| Time | Do | Suggested narration |
+|---|---|---|
+| **0–10 s** | Show the fixed microphone/camera rig, then the live view. | “A sound happens while you are distracted. Where did it come from, and what did you miss?” |
+| **10–30 s** | With the scene stationary, clap on the left; then play a ringtone from the visible source on the right for 3–5 seconds. Stop it. | “Four microphones measure acoustic direction. The camera adds visible surfaces and depth. The overlay shows agreement with the sound.” |
+| **30–45 s** | Leave the source still while its likely label or caption arrives. Show the event time and uncertainty. | “Meta adds a likely interpretation and nearby context. This surface is a candidate; an outline alone cannot prove it made the sound.” |
+| **45–70 s** | **T**: `When did the phone ring?` → Enter. Open the matching event with **B**, inspect the saved scene, and press **E** for a short audio replay if available. | “Now I can ask about the past and check the actual recording: what was heard, when, and where the evidence pointed.” |
+| **70–82 s** | If no doorbell event exists in this take, ask `Was there a doorbell in the last five minutes?` | “It can also say there is no matching recorded event. It does not have to invent an answer.” |
+| **82–90 s** | Return to the live view or hold the evidence screen. | “Local acoustic localization, Meta interpretation, and a memory you can verify. SoundScope works on its own.” |
 
-- Search reports saved observations, not a current search for a silent missing phone.
-- A depth reading belongs to a visible surface consistent with the sound. It is not acoustic range.
-- A phone ringing under a pillow can be detected acoustically, but the system cannot claim “under
-  this pillow” merely because a pillow is visible. For the deadline, demonstrate a visible ringing source.
-- Loudness is relative to noise or digital full scale; this setup is not calibrated in dB SPL.
-- When evidence is weak or broad, show that state. Do not turn uncertainty into an exact source claim.
+A search may already select or expose the matching event; use **B** to enter history if necessary.
+**Up/Down** selects an event. Saved candidate pixels belong to the saved scene, not to whatever is
+currently in front of the camera.
+
+Allow real response time. Earlier development calls sometimes took 5–15 seconds; this is not a
+latency guarantee. Trim waits for the final edit without changing the event/answer pairing. Do not
+place a successful overlay over an unrelated sound. If a label is wrong, show the uncertainty or
+make a new honest attempt. An optional SAM outline or voice query is useful only if it actually works
+in the take; the evidence-backed history is the central demonstration.
+
+## Controls during the take
+
+- **F:** fullscreen. **M:** palette. **H:** heatmap visibility.
+- **T:** type a history question; Enter submits, Esc cancels. With Meta disabled, retrieval is local.
+- **B:** saved-event history; Up/Down selects; B or Esc returns to live view.
+- **E:** explicitly play the selected saved audio when available. Playback loudness may be normalized.
+- **A** in history: explicitly request Meta analysis of that saved event (requires Meta enabled).
+  Automatic analysis skips recordings below the configured raw-peak threshold, initially -50 dBFS
+  for this microphone gain. This is a credit-saving heuristic, not a physical loudness threshold.
+  Quiet accepted events are still saved, and A lets you request analysis without changing their timestamps.
+- **V:** spoken command, using transcription and model interpretation when credits permit.
+- **L:** recent sounds. **S:** diagnostic evidence snapshot. **Q:** finish and save cleanly.
+
+## Keep these distinctions visible
+
+- **Direction versus source:** the acoustic map estimates direction; depth belongs to a visible
+  candidate surface. Neither is proof that a particular object produced the sound.
+- **History versus tracking:** search retrieves recorded events. It does not locate a silent missing
+  phone or establish its current position after it has moved.
+- **Saved media versus live video:** history uses captured WAV audio and a scene JPEG, with timing
+  and availability metadata. Do not describe a scene frame as an event video clip or exact synchronization.
+- **Labels versus certainty:** Meta confidence and personal-example similarity are not validated
+  recognition probabilities. Speaker letters/names are approximate associations, not identity verification.
+- **Loudness:** SNR and dBFS are not calibrated dB SPL. Replay volume is not the original sound level.
+- **No match:** “no matching recorded event” does not establish that nothing happened.
+- **Privacy:** `--private` blocks camera-image uploads; spectrogram images and speech can still be
+  uploaded for enabled features. Keep consented subjects and suitable surroundings in the shot.

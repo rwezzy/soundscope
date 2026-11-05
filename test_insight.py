@@ -57,7 +57,8 @@ class Worker(unittest.TestCase):
         view = {'spot': (100, 80), 'point': np.array([0.3, 0.0, 1.0]), 'measured': True,
                 'quality': {'state': 'candidate'}}
         rec = sm.make_record({'snr_db': snr, 'seconds': len(x) / 16000, 'z': 30}, [math.sin(a), 0, math.cos(a)],
-                             profile=sm.acoustic_profile(x), view=view)
+                             profile=sm.acoustic_profile(x), view=view,
+                             level={'peak_dbfs': -38.0, 'rms_dbfs': -48.0})
         self.memory.add(rec)
         return {'record': rec, 'wav': wav_bytes(x), **extra}
 
@@ -205,7 +206,7 @@ class Worker(unittest.TestCase):
         self.assertEqual(alerts(), ['knock on the door'])
         self.clock.t += 30
         self.meta.classify_sound.return_value = {'label': 'doorbell chime', 'category': 'beep or tone',
-                                                 'description': 'two tones', 'confidence': 0.7, 'watch': []}
+                                                 'description': 'two tones', 'confidence': 0.8, 'watch': []}
         e.process(self.task(tone(), snr=18.8))           # named in the label, not listed: still an alert
         self.assertEqual(alerts(), ['knock on the door', 'doorbell'])
         self.clock.t += 30
@@ -236,11 +237,20 @@ class Worker(unittest.TestCase):
         e = self.enricher(features=('identify',))
         e.watch = ['phone ringing']
         self.meta.classify_sound.return_value = {'label': 'phone ringing', 'category': 'alarm or ringtone',
-                                                 'description': 'beeps', 'confidence': 0.4, 'watch': []}
-        e.process(self.task(tone(), snr=12.0))            # 0.4 sure at +12 dB: no alert
+                                                 'description': 'beeps', 'confidence': 0.7, 'watch': []}
+        e.process(self.task(tone(), snr=12.0))            # 0.7 sure at +12 dB: no alert
         self.clock.t += 30
-        e.process(self.task(tone(), snr=33.0))            # 0.4 sure at +33 dB (live ring, Nov 4): alert
+        e.process(self.task(tone(), snr=33.0))            # 0.7 sure at +33 dB: alert
         self.assertEqual([r[2]['watch'] for r in self.results if r[1] == 'alert'], ['phone ringing'])
+
+    def test_loud_but_uncertain_model_label_does_not_raise_alarm(self):
+        e = self.enricher(features=('identify',))
+        e.watch = ['smoke alarm']
+        self.meta.classify_sound.return_value = {'label': 'smoke alarm', 'category': 'alarm or ringtone',
+                                                 'description': 'sharp whistle', 'confidence': 0.6,
+                                                 'watch': ['smoke alarm']}
+        e.process(self.task(tone(), snr=30.0))
+        self.assertEqual([r for r in self.results if r[1] == 'alert'], [])
 
     def test_names_are_listened_for_in_longer_sounds(self):
         e = self.enricher(features=('captions',))

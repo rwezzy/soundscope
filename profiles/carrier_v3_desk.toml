@@ -14,13 +14,13 @@ pitch_deg = 0
 [array]
 mount = "facing"               # board standing, LED side toward the scene
 cable_edge = "up"              # USB edge up
-mirror = true                 # same physical carrier orientation as carrier_v3
+mirror = false                # same physical carrier orientation as carrier_v3
 # This is the microphone centre IN THE ARM BASE FRAME, not a camera-relative offset.
-# camera position + nominal carrier offset [4, -11, 128] = [-376, 729, 288].
+# camera position + current carrier offset [4, -11, 130] = [-376, 729, 290].
 # The user's board lower edge 80 mm above the lens gives about 130 mm to its centre;
-# nominal CAD 128 mm is retained so standalone and desk profiles use the same rigid geometry.
+# both standalone and desk profiles use this same approximate physical geometry.
 # Forward/sideways offsets and zero yaw/pitch are estimates, not a measured calibration.
-position_mm = [-376, 729, 288]
+position_mm = [-376, 729, 290]
 front_yaw_deg = 0              # C in scope.py --mount carrier_v3_desk saves yaw to THIS profile
 
 # Reported wall planes: about X=-500 mm behind and Y=-500 mm to the right of the base.
