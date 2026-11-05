@@ -73,7 +73,7 @@ class Safety(unittest.TestCase):
         return aim.Gate(cfg_with(safety=safety), start)
 
     def test_big_turns_are_split_into_capped_steps(self):
-        g = self.gate()
+        g = self.gate(yaw_window_deg=[-90, 90])
         new, note = g.next_joints([0, 0, 90, 0, 90, 0], 80, now=10)
         self.assertEqual(new[0], 30)
         self.assertIn('50° more', note)
@@ -83,7 +83,7 @@ class Safety(unittest.TestCase):
         self.assertEqual(self.gate().next_joints([0] * 6, 4, now=10), (None, 'already facing it'))
 
     def test_turns_stop_at_the_window(self):
-        g = self.gate()
+        g = self.gate(yaw_window_deg=[-90, 90])
         q = [0.0, 0, 90, 0, 90, 0]
         for _ in range(10):
             new, note = g.next_joints(q, 150, continuing=True)

@@ -16,7 +16,8 @@ collision_sensitivity = 4      # Viam arm attribute: 0 = off .. 5 = stops with t
 max_step_deg = 30              # biggest single turn; longer turns happen in steps (cap 45)
 deadband_deg = 6               # ignore aim changes smaller than this
 min_interval_s = 1.5           # minimum time between new turns
-yaw_window_deg = [-90, 90]     # J1 may only turn this far either side of where it started (cap 170)
+yaw_window_deg = [-45, 45]     # J1 may only turn this far either side of where it started (cap 170).
+                               # 45 keeps a fully stretched arm 10+ cm clear of walls 50 cm away, either way
 pitch_window_deg = [-15, 15]   # same for J5, used only when aim.use_pitch = true (cap 30)
 min_confidence_z = 12          # only turn for "solid" sound fixes (z, as mic_test prints it)
 min_snr_db = -20               # faint is fine as long as z is high
