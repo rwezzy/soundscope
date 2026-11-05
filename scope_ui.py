@@ -541,11 +541,94 @@ def _alert_banner(image, text):
                 max(2, int(size * 2.2)), cv2.LINE_AA)
 
 
+# One color per talker, so a subtitle and its marker on the picture's edge go together.
+TALKER_COLORS = ((94, 229, 245), (178, 82, 255), (120, 220, 120), (255, 196, 92), (90, 160, 255))
+
+
+def _talker_color(name):
+    words = str(name or '').split()
+    if len(words) == 2 and words[0].lower() == 'speaker' and words[1].isdigit():
+        return TALKER_COLORS[(int(words[1]) - 1) % len(TALKER_COLORS)]
+    return TALKER_COLORS[sum(map(ord, str(name or ''))) % len(TALKER_COLORS)]
+
+
+def _side(cap, w):
+    """-1 left, +1 right, 0 ahead/unknown, from the talker's pixel or the direction words."""
+    pixel = cap.get('pixel')
+    try:
+        if pixel is not None:
+            off = (float(pixel[0]) - w / 2) / (w / 2)
+            return -1 if off < -0.18 else 1 if off > 0.18 else 0
+    except (TypeError, ValueError, IndexError):
+        pass
+    words = str(cap.get('where') or '').lower()
+    return -1 if 'left' in words else 1 if 'right' in words else 0
+
+
+def _subtitles(image, subs, scale):
+    """Speech along the bottom of the picture, like film subtitles, never over anyone's face.
+
+    Each line starts with the talker's name in their color and an arrow toward their side; a small
+    marker in the same color sits on the picture's bottom edge right under where they are."""
+    h, w = image.shape[:2]
+    sc = max(0.6, scale)
+    size = 0.5 * sc
+    line_h = int(26 * sc)
+    blocks = []
+    for cap in list(subs)[-2:]:  # the two newest, newest at the bottom
+        speaker = str(cap.get('speaker') or '').strip()
+        spoken = _clean(cap.get('spoken') or cap.get('text') or '')
+        if not spoken:
+            continue
+        color = _talker_color(speaker)
+        lead = int(30 * sc) + (_width(speaker + ':', size, True) + int(8 * sc) if speaker else 0)
+        lines = _wrap(spoken, int(w * 0.86) - lead, size, 2)
+        blocks.append((cap, speaker, color, lead, lines))
+    if not blocks:
+        return
+    total = sum(len(b[4]) for b in blocks) * line_h + int(14 * sc) * len(blocks) + int(10 * sc)
+    top = h - total - int(16 * sc)
+    overlay = image.copy()
+    cv2.rectangle(overlay, (0, top - int(6 * sc)), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.62, image, 0.38, 0, dst=image)
+    y = top
+    for cap, speaker, color, lead, lines in blocks:
+        width = lead + max(_width(line, size) for line in lines)
+        x0 = max(int(12 * sc), (w - width) // 2)
+        mid = y + line_h // 2 + int(2 * sc)
+        side, a = _side(cap, w), int(7 * sc)
+        cx = x0 + int(10 * sc)
+        if side == 0:
+            cv2.circle(image, (cx, mid), max(3, a // 2), color, -1, cv2.LINE_AA)
+        else:
+            tip = cx + side * a
+            cv2.fillConvexPoly(image, np.array([[tip, mid], [tip - side * 2 * a, mid - a], [tip - side * 2 * a, mid + a]],
+                                               np.int32), color, cv2.LINE_AA)
+        if speaker:
+            _text(image, speaker + ':', x0 + int(30 * sc), y + line_h - int(6 * sc), size, color, 2)
+        for i, line in enumerate(lines):
+            _text(image, line, x0 + lead, y + line_h * (i + 1) - int(6 * sc), size, TEXT)
+        pixel = cap.get('pixel')
+        if pixel is not None:  # marker on the bottom edge, straight below the talker
+            try:
+                u = int(np.clip(float(pixel[0]), a, w - a - 1))
+                cv2.fillConvexPoly(image, np.array([[u, h - int(13 * sc)], [u - a, h - 1], [u + a, h - 1]], np.int32),
+                                   color, cv2.LINE_AA)
+            except (TypeError, ValueError, IndexError):
+                pass
+        y += line_h * len(lines) + int(14 * sc)
+
+
 def _captions(image, captions, scale):
-    """Caption bubbles near the pixel each sound came from (bottom center when off screen)."""
+    """Speech becomes subtitles at the bottom; other notes are bubbles near the spot their sound came from."""
+    captions = list(captions or ())
+    subs = [c for c in captions if c.get('kind') == 'speech']
+    captions = [c for c in captions if c.get('kind') != 'speech']
+    if subs:
+        _subtitles(image, subs, scale)
     h, w = image.shape[:2]
     placed = []
-    for cap in captions or ():
+    for cap in captions:
         text = _clean(cap.get('text', ''))[:140]
         if not text:
             continue

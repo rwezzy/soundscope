@@ -978,7 +978,8 @@ class Session:
                     text = f"{turn['name']} ({turn['where']}): {turn['text']}"
                     self.ui['latest_transcript'] = {
                         'text': text, 'time': str((rec or {}).get('time') or '')[11:19] or time.strftime('%H:%M:%S')}
-                    self.show(text, pixel, now + CAPTION_S, 'speech')
+                    self.show(text, pixel, now + CAPTION_S, 'speech', speaker=turn['name'], where=turn['where'],
+                              spoken=turn['text'])
                     print('  ' + text, flush=True)
                     called = sound_memory.name_called(turn['text'], self.names)
                     if called:  # someone is calling you: say who and from where
@@ -1025,10 +1026,11 @@ class Session:
             self.memory.update(rid, {'alerts': sorted(set((rec.get('alerts') or []) + [tag]))})
         beep()
 
-    def show(self, text, pixel, until, kind):
-        """A caption at the sound's pixel, unless the result came in too late to be useful on screen."""
+    def show(self, text, pixel, until, kind, **extra):
+        """A caption at the sound's pixel (speech: a subtitle), unless the result came in too late to be
+        useful on screen. extra: speaker, where, spoken (the words alone) for subtitles."""
         if pixel != 'late':
-            self.captions.append({'text': text, 'pixel': pixel, 'until': until, 'kind': kind})
+            self.captions.append({'text': text, 'pixel': pixel, 'until': until, 'kind': kind, **extra})
 
     def ask(self, cmd, text):
         """Answer a spoken question about past sounds (search / who / describe), or set a watch."""
