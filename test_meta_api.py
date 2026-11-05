@@ -158,6 +158,20 @@ def chat_reply(content, prompt_tokens=1000, completion_tokens=400):
 
 
 class Requests(unittest.TestCase):
+    def test_classifier_does_not_send_heuristic_labels_as_measurements(self):
+        meta = FakeMeta([chat_reply({'label': 'tone', 'category': 'beep or tone',
+                                    'description': 'horizontal lines', 'confidence': .6, 'watch': []})])
+        meta.classify_sound(clip(), {'dominant_hz': 900, 'tone_share': .664,
+                                    'flatness': .021, 'character': 'speech-like',
+                                    'speech_score': .54, 'onsets': float('nan')})
+        payload = json.loads(meta.sent[0][1])
+        facts = payload['messages'][1]['content'][0]['text']
+        self.assertIn('900.0', facts)
+        self.assertIn('0.664', facts)
+        self.assertNotIn('speech-like', facts)
+        self.assertNotIn('speech_score', facts)
+        self.assertNotIn('NaN', facts)
+
     def test_chat_costs_what_the_reply_reports(self):
         meta = FakeMeta([chat_reply({'label': 'hand clap', 'category': 'clap or knock', 'description': 'sharp',
                                      'confidence': 1.4, 'watch': ['hand clap', 'invented']})])
@@ -179,14 +193,16 @@ class Requests(unittest.TestCase):
                                      'action': 'a mug was set down', 'consistent': 'yes', 'near': 'a laptop',
                                      'surface': 'desk', 'watch': [], 'summary': 'A mug was set on the desk.'},
                                     prompt_tokens=5000)])
-        reply = meta.source_check(clip(), b'after-jpeg', b'before-jpeg', {'onsets': 1}, watch=['kettle'])
+        reply = meta.source_check(clip(), b'after-jpeg', b'before-jpeg',
+                                  {'onsets': 1, 'character': 'speech-like'}, watch=['kettle'])
         self.assertEqual(reply['consistent'], 'yes')
         payload = json.loads(meta.sent[0][1])
         parts = payload['messages'][1]['content']
         self.assertEqual(sum(1 for part in parts if part['type'] == 'image_url'), 3)
         self.assertIn('Watch list: ["kettle"]', parts[0]['text'])
+        self.assertNotIn('speech-like', parts[0]['text'])
         self.assertEqual(payload['response_format']['json_schema']['name'], 'sound_source')
-        self.assertIn('ALREADY located', payload['messages'][0]['content'])
+        self.assertIn('not a verified sound source', payload['messages'][0]['content'])
 
     def test_budget_refusal_sends_nothing_and_failures_cost_nothing(self):
         meta = FakeMeta([], session_usd=0.001)

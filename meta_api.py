@@ -102,7 +102,8 @@ CLASSIFY_SCHEMA = {
                    'confidence': {'type': 'number', 'minimum': 0, 'maximum': 1},
                    'watch': {'type': 'array', 'items': {'type': 'string'}}},
 }
-CLASSIFY_PROMPT = ('You are the ears of SoundScope, which already knows WHERE each sound came from. You get a '
+CLASSIFY_PROMPT = ('You interpret audio evidence for SoundScope. Its microphone array estimates direction, '
+                   'but that does not prove which object emitted the sound. You get a '
                    'spectrogram picture of one sound (time left to right, 0-8 kHz bottom to top, brighter = '
                    'louder) and a few measurements. If labeled example rows are shown, the UNKNOWN row is the '
                    'sound to judge; prefer an example label when it clearly matches. label: 1-4 words for what '
@@ -121,8 +122,9 @@ SOURCE_SCHEMA = {
                    'watch': {'type': 'array', 'items': {'type': 'string'}},
                    'summary': {'type': 'string'}},
 }
-SOURCE_PROMPT = ('You are the eyes and ears of SoundScope. Its microphone array has ALREADY located a sound: the '
-                 'thin crosshair in the camera crops marks where the sound came from. Never search the rest of '
+SOURCE_PROMPT = ('You interpret sound and scene evidence for SoundScope. The microphone array estimates a '
+                 'direction: the thin crosshair marks a candidate visible surface along that direction, '
+                 'not a verified sound source. Never search the rest of '
                  'the picture for a source; describe only what is at or touching the crosshair. You get: (1) a '
                  'spectrogram of the sound (time left to right, 0-8 kHz bottom to top, brighter = louder), (2) '
                  'the camera crop when the sound ended, and possibly (3) the same crop just before it began. '
@@ -139,8 +141,9 @@ NEAR_SCHEMA = {
     'type': 'object', 'additionalProperties': False, 'required': ['near', 'surface'],
     'properties': {'near': {'type': 'string'}, 'surface': {'type': 'string'}},
 }
-NEAR_PROMPT = ('A microphone array already located a sound at the center of this camera crop (marked with a '
-               'thin crosshair). Do not guess what made the sound. near: list the 1-3 most noticeable objects '
+NEAR_PROMPT = ('A microphone array estimates a sound direction near the center of this camera crop (marked '
+               'with a thin crosshair). The visible surface is not a verified source. Do not guess what '
+               'made the sound. near: list the 1-3 most noticeable objects '
                'at or right around the crosshair, as a short phrase ("a laptop and a mug"). surface: what '
                'they rest on or are part of ("desk", "shelf", "floor", "wall", "unknown"). Use few words.')
 SEARCH_SCHEMA = {
@@ -448,6 +451,21 @@ def _text_tokens(content):
     return total
 
 
+def acoustic_measurements(measurements):
+    """Only measured numerical features may accompany sound-classification inputs.
+
+    Sending our tentative `character` or `speech_score` as evidence can make a
+    model repeat the same heuristic mistake. Labels are outputs, not measurements.
+    """
+    if not isinstance(measurements, dict):
+        return {}
+    fields = ('duration_s', 'dominant_hz', 'second_hz', 'centroid_hz', 'flatness',
+              'tone_share', 'onsets', 'attack_ms', 'contrast_db')
+    return {key: float(value) for key in fields
+            if isinstance(value := measurements.get(key), (int, float))
+            and not isinstance(value, bool) and math.isfinite(value)}
+
+
 class Meta:
     def __init__(self, budget=None):
         self.key = os.environ.get('MODEL_API_KEY', '').strip()
@@ -569,6 +587,7 @@ class Meta:
 
     def classify_sound(self, wav, measurements=None, sheet=None, watch=()):
         """Muse Spark: what the sound most likely is -> {label, category, description, confidence, watch}."""
+        measurements = acoustic_measurements(measurements)
         facts = f'Measurements: {json.dumps(measurements)}' if measurements else 'No measurements.'
         facts += f' Watch list: {json.dumps(list(watch))}.' if watch else ' No watch list.'
         content = [{'type': 'text', 'text': 'What is this sound? ' + facts},
@@ -585,6 +604,7 @@ class Meta:
         (after, and optionally before, the sound) -> {sound, sound_confidence, object, action,
         consistent, near, surface, watch, summary}. The crops only describe that spot; the location
         itself always comes from the microphones."""
+        measurements = acoustic_measurements(measurements)
         facts = f'Measurements: {json.dumps(measurements)}.' if measurements else ''
         facts += f' Watch list: {json.dumps(list(watch))}.' if watch else ' No watch list.'
         content = [{'type': 'text', 'text': 'Image 1: the sound. ' + facts},

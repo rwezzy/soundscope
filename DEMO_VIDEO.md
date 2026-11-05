@@ -79,6 +79,14 @@ to replay one selected raw microphone and **2** for the old unaligned channel av
 use the same playback gain. The six-channel original and diagnostics stay in the ignored
 `recordings/audio_checks/` folder; this check makes no API calls.
 
+The latest simple-ring check produced “telephone ringing” from a saved spectrogram with numeric
+measurements. An earlier call on the same clip returned speech when given a misleading local
+“speech-like” hint; those hints are now excluded. This is one debugging example, not a measured
+recognition rate. Rehearse the **live event → saved evidence → search** sequence separately.
+If the event is saved without automatic analysis because its original peak is below the digital
+threshold, **A** in history requests analysis under the existing budget. Show that interaction
+honestly rather than presenting an explicit request as an automatic result.
+
 - **F:** fullscreen. **M:** palette. **H:** heatmap visibility.
 - **T:** type a history question; Enter submits, Esc cancels. With Meta disabled, retrieval is local.
 - **B:** saved-event history; Up/Down selects; B or Esc returns to live view.

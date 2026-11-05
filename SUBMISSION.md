@@ -76,9 +76,13 @@ The recording guide and launch commands are in [DEMO_VIDEO.md](DEMO_VIDEO.md).
 
 - The live rehearsal verified saved-image history, audio replay, a Meta transcript and a search
   response. Single-microphone replay was reported clearer than the old channel average. A song
-  used as a ringtone was classified as speaking; this did not establish ringtone recognition.
-  Simple ringtone classification and a positive ringtone-history search remain unverified.
-  Verify those features in the final take before claiming them.
+  used as a ringtone was classified as speaking. In a later recorded simple-ring test, Spark
+  labelled the same captured sound as human speech when supplied a local “speech-like” hint,
+  then as “telephone ringing” (reported confidence 0.72) with numeric measurements instead.
+  The code now excludes heuristic labels from those inputs and routes strongly tonal events
+  to sound identification. This is one corrected example, not a recognition benchmark or proof
+  that the prompt change alone caused the difference. The live automatic ringtone-to-history
+  flow and a positive ringtone-history search still need verification in the final take.
 - Report any accuracy measurements with their actual test conditions. Do not present archived
   measurements as a benchmark for the current sensor assembly.
 - Keep the standalone system as the demonstrated scope. Autonomous robotic pickup and reliable

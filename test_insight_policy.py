@@ -2,12 +2,16 @@
 import copy
 import math
 import os
+from pathlib import Path
 import time
 import unittest
 from unittest import mock
 
-from insight import Enricher
+import numpy as np
+
+from insight import Enricher, likely_speech
 from meta_api import BudgetError
+from sound_memory import acoustic_profile, wav_samples
 import test_insight as fixtures
 from test_sound_memory import tone, voice
 
@@ -106,9 +110,9 @@ class PaidPolicy(unittest.TestCase):
         self.meta.source_check.assert_not_called()
         self.meta.classify_sound.assert_called_once()
 
-    def test_explicit_speech_like_ring_tries_asr_before_one_audio_only_fallback(self):
+    def test_explicit_ambiguous_audio_tries_asr_before_one_audio_only_fallback(self):
         task = self.visual_task(explicit=True)
-        task['record']['acoustic']['speech_score'] = 0.8
+        task['record']['acoustic'].update(speech_score=0.8, tone_share=0.3)
         task['record']['duration_s'] = 1.0
         task['record']['loudness']['snr_db'] = 1.0
         order = mock.Mock()
@@ -123,7 +127,7 @@ class PaidPolicy(unittest.TestCase):
 
     def test_explicit_blank_asr_turns_do_not_count_as_a_usable_transcript(self):
         task = self.visual_task(explicit=True)
-        task['record']['acoustic']['speech_score'] = 0.8
+        task['record']['acoustic'].update(speech_score=0.8, tone_share=0.3)
         task['record']['duration_s'] = 1.0
         self.meta.transcribe_turns.return_value = {
             'text': ' ', 'turns': [{'text': ' ', 'start_s': 0, 'end_s': 1, 'speaker': 'A'}]}
@@ -242,6 +246,63 @@ class PaidPolicy(unittest.TestCase):
         record['where'] = []
         self.assertFalse(worker.automatic_media_eligible(record))
         self.assertFalse(worker.automatic_media_eligible(None))
+
+    def test_modulated_tones_use_one_audio_label_across_pitch_and_cadence(self):
+        t = np.arange(4 * 16000) / 16000
+        noise = np.random.default_rng(42).normal(0, 0.004, len(t))
+        misrouted_before = 0
+        for hz in (440, 700, 900, 1400, 2200):
+            for cadence in (2, 5, 8):
+                with self.subTest(hz=hz, cadence=cadence):
+                    for name in vars(self.meta):
+                        getattr(self.meta, name).reset_mock()
+                    phase = 2 * np.pi * hz * t + 3 * np.sin(2 * np.pi * 1.7 * t)
+                    envelope = 0.5 * (1 + np.sign(np.sin(2 * np.pi * cadence * t)))
+                    x = 0.1 * np.sin(phase) * envelope + noise
+                    task = self.task(x)
+                    acoustic = task['record']['acoustic']
+                    misrouted_before += acoustic['speech_score'] >= 0.5
+                    self.assertFalse(likely_speech(acoustic))
+                    self.enricher().process(task)
+                    self.meta.classify_sound.assert_called_once()
+                    self.meta.transcribe_turns.assert_not_called()
+                    facts = self.meta.classify_sound.call_args.args[1]
+                    self.assertIn('flatness', facts)
+                    self.assertIn('tone_share', facts)
+                    self.assertNotIn('character', facts)
+                    self.assertNotIn('speech_score', facts)
+        self.assertGreaterEqual(misrouted_before, 9)
+
+    def test_tonal_routing_does_not_relax_possible_speech_visual_gate(self):
+        task = self.visual_task()
+        task['record']['acoustic'].update(speech_score=0.54, tone_share=0.664, flatness=0.021)
+        self.enricher().process(task)
+        self.meta.classify_sound.assert_called_once()
+        self.meta.transcribe_turns.assert_not_called()
+        self.meta.source_check.assert_not_called()
+        self.meta.describe_near.assert_not_called()
+        self.meta.segment_at.assert_not_called()
+
+    def test_real_and_varied_synthetic_speech_still_go_to_transcription(self):
+        real = wav_samples((Path(__file__).with_name('test_data') / 'array_tts_find_my_keys.wav').read_bytes())
+        for index, x in enumerate([real] + [voice(3, f0=f0) for f0 in (100, 140, 220)]):
+            with self.subTest(example=index):
+                for name in vars(self.meta):
+                    getattr(self.meta, name).reset_mock()
+                task = self.task(x)
+                self.assertTrue(likely_speech(task['record']['acoustic']))
+                self.enricher().process(task)
+                self.meta.transcribe_turns.assert_called_once()
+                self.meta.classify_sound.assert_not_called()
+
+    def test_speech_routing_requires_both_valid_tonal_measurements(self):
+        base = {'speech_score': 0.7, 'tone_share': 0.7, 'flatness': 0.01}
+        self.assertFalse(likely_speech(base))
+        for patch in ({'tone_share': 0.59}, {'flatness': 0.051}, {'tone_share': None},
+                      {'flatness': None}, {'tone_share': math.nan}, {'flatness': math.inf},
+                      {'flatness': -0.01}, {'tone_share': 1.5}):
+            with self.subTest(patch=patch):
+                self.assertTrue(likely_speech({**base, **patch}))
 
 
 if __name__ == '__main__':

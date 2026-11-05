@@ -248,7 +248,10 @@ def run(args):
                             status, detail = 'Playback failed.', str(exc)
     finally:
         sd.stop()
-        cv2.destroyWindow(WINDOW)
+        try:
+            cv2.destroyWindow(WINDOW)
+        except cv2.error:
+            pass  # Windows may already have destroyed it when the user clicks X.
     return 0
 
 

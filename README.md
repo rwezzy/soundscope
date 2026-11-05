@@ -159,6 +159,15 @@ It answers about past observations; it does not track a silent object after the 
 
 ## Earlier development observations
 
+A later November 4 check used **one real captured simple ringtone**. Spark returned “human
+speech” when the input included a local “speech-like” heuristic, and “telephone ringing”
+(reported confidence 0.72) when the same clip was supplied with numeric measurements instead.
+Classification inputs now exclude local heuristic labels and speech scores; strongly tonal
+events can reach sound identification instead of being routed only to transcription.
+These two calls are a debugging observation, not a controlled accuracy benchmark or proof of
+causation. Model confidence is not measured accuracy. The result was obtained from a saved clip;
+automatic live labelling and a positive ringtone-history search still need end-to-end verification.
+
 The following are **archived development observations from November 4**, with earlier geometry,
 calibration and test conditions. They are not fresh accuracy measurements for the current assembly:
 

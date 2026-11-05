@@ -51,6 +51,29 @@ PEOPLE = re.compile(r'\b(person|people|face|mouth|lips|head|man|woman|child|kid|
                     re.IGNORECASE)
 
 
+def likely_speech(acoustic):
+    """Route ambiguous narrow-band beeps to sound identification, not ASR alone.
+
+    A modulated tone can have a syllable-rate envelope and score as speech.
+    Dominant tonal energy plus low spectral flatness is contrary evidence;
+    this heuristic chooses an analysis path, never a verified sound label.
+    Missing/invalid tonal measurements do not override a speech indication.
+    """
+    try:
+        score = float(acoustic.get('speech_score', 0))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(score) or score < SPEECH_SCORE:
+        return False
+    try:
+        share, flatness = float(acoustic.get('tone_share')), float(acoustic.get('flatness'))
+        concentrated_tone = (math.isfinite(share) and math.isfinite(flatness)
+                             and 0.60 <= share <= 1.0 and 0.0 <= flatness <= 0.05)
+    except (TypeError, ValueError, OverflowError):
+        concentrated_tone = False
+    return not concentrated_tone
+
+
 class RateLimit:
     """At most `per_minute` events per minute and one every `gap_s` seconds."""
 
@@ -255,8 +278,11 @@ class Enricher(threading.Thread):
             stale = True
         acoustic = record.get('acoustic') or {}
         wav = task.get('wav')
+        # Preserve the broader possible-speech flag for camera/privacy checks.
+        # Tonal ambiguity only changes audio analysis routing.
         speech_like = acoustic.get('speech_score', 0) >= SPEECH_SCORE
-        speechy = speech_like and record.get('duration_s', 0) >= 0.5  # long enough to caption
+        speech_likely = likely_speech(acoustic)
+        speechy = speech_likely and record.get('duration_s', 0) >= 0.5  # long enough to caption
 
         watch = list(self.watch)
         if wav and self.references is not None and self.references.items:
@@ -282,7 +308,11 @@ class Enricher(threading.Thread):
         strong = snr >= META_MIN_SNR_DB and (
             (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or snr >= 6)
         trusted_local = ((record.get('sound') or {}).get('local_similarity') or 0) >= 0.92
-        facts = {k: acoustic.get(k) for k in ('duration_s', 'dominant_hz', 'centroid_hz', 'onsets', 'character')}
+        # Send measurements rather than a heuristic category such as "speech-like",
+        # which otherwise primes the model to repeat the routing mistake.
+        facts = {k: acoustic.get(k) for k in ('duration_s', 'dominant_hz', 'second_hz', 'centroid_hz',
+                                            'flatness', 'tone_share', 'voice_band', 'onsets',
+                                            'attack_ms', 'crest_db')}
         sheet = (self.references.sheet(wav) if wav and self.references is not None and self.references.items
                  else None)
         crop = task.get('crop_jpeg')
@@ -310,7 +340,7 @@ class Enricher(threading.Thread):
                 person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
                 if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
                     task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
-        if (not explicit and wav and strong and not speech_like and not checked and (not trusted_local or watch)
+        if (not explicit and wav and strong and not speech_likely and not checked and (not trusted_local or watch)
                 and self._meta_ok('identify')):
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
             if reply:
@@ -325,7 +355,7 @@ class Enricher(threading.Thread):
         # a door at the start can hide a sentence; live, Nov 4). A caption costs about $0.0003.
         long_enough = self.listen_for_names and record.get('duration_s', 0) >= 1.0
         captioned = False
-        if (speechy or long_enough or (explicit and speech_like and wav)) and self._meta_ok(
+        if (speechy or long_enough or (explicit and speech_likely and wav)) and self._meta_ok(
                 'captions', on_block=manual_notice if explicit else None):
             speech_wav = task.get('speech_wav') or wav
             reply = self._call(rid, self.meta.transcribe_turns, speech_wav) if speech_wav else None
