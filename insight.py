@@ -57,6 +57,15 @@ META_MIN_SNR_DB = 3.0  # quieter sounds keep their free measurements but get no 
 # from automatic labels and captions. This floor only rejects near-silent glitches now; the
 # over-the-room SNR gates (META_MIN_SNR_DB) decide what is worth a request.
 AUTO_META_MIN_PEAK_DBFS = -80.0
+# A steady tone well above the voice range (a phone ring, a beep). Its energy sits in a few frequency
+# bins, while the SNR averages the whole band, so it is clearly audible at a lower SNR. Live, Nov 5: a
+# phone rang 11 times at 1148 Hz and measured only +1.5 to +3 dB, under the 3 dB gate, so it was never
+# named; the room's 150-175 Hz hum also made it score as speech.
+TONAL_MIN_SNR_DB, TONAL_MIN_HZ, TONAL_MAX_FLATNESS, TONAL_MIN_SHARE = 1.0, 700.0, 0.06, 0.2
+# What speech recognition writes for noise, music or a ring when nobody spoke. Live, Nov 5: "Yeah" about
+# 20 times in 10 minutes (a ringing phone, the room hum), "[Music]" for a ringtone.
+FILLER_WORDS = {'yeah', 'yes', 'yep', 'yup', 'okay', 'ok', 'oh', 'uh', 'um', 'hmm', 'mm', 'mhm', 'huh', 'you', 'bye'}
+FILLER_PHRASES = {'thank you', 'thanks', 'thank you for watching', 'thanks for watching', 'music'}
 _ACTIVITY_LABELS = {
     'source_check': 'Muse Spark: sound and scene',
     'classify_sound': 'Muse Spark: sound label',
@@ -91,6 +100,36 @@ def likely_speech(acoustic):
     except (TypeError, ValueError, OverflowError):
         concentrated_tone = False
     return not concentrated_tone
+
+
+def tonal_beep(acoustic):
+    """A steady tone at 700 Hz or above carries the sound (a ring, a beep, a whistle; not a voice)."""
+    try:
+        flatness, share = float(acoustic.get('flatness')), float(acoustic.get('tone_share'))
+        pitches = [float(f) for f in (acoustic.get('dominant_hz'), acoustic.get('second_hz')) if f is not None]
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return False
+    return (math.isfinite(flatness) and math.isfinite(share) and 0.0 <= flatness <= TONAL_MAX_FLATNESS
+            and share >= TONAL_MIN_SHARE and any(math.isfinite(f) and f >= TONAL_MIN_HZ for f in pitches))
+
+
+def audible(record, min_snr_db):
+    """Loud enough over the room for a model call or a prompt; a steady high tone counts from 1 dB."""
+    try:
+        snr = float((record.get('loudness') or {}).get('snr_db'))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(snr) and (
+        snr >= min_snr_db or (snr >= TONAL_MIN_SNR_DB and tonal_beep(record.get('acoustic') or {})))
+
+
+def filler_transcript(text):
+    """Only a filler word or a non-speech tag ("Yeah.", "[Music]", "♪"): what ASR invents for noise."""
+    text = str(text or '').strip()
+    if not text or re.fullmatch(r'[\[(*♪♫].*[\])*♪♫]|[♪♫\s.]+', text, re.DOTALL):
+        return True
+    words = re.findall(r"[a-z']+", text.lower())
+    return not words or all(w in FILLER_WORDS for w in words) or ' '.join(words) in FILLER_PHRASES
 
 
 class RateLimit:
@@ -160,6 +199,7 @@ class Enricher(threading.Thread):
         self.max_age_s = 45.0    # older sounds get no Meta request
         self.alerted = {}        # watched sound -> when it last raised an alert
         self.possibles = {}      # watched sound -> when it was last offered as "possible"
+        self.tones = []          # (epoch, high pitches) of recent steady tones, to spot a ring pattern
         self._activity_lock = threading.Lock()
         self._activity_active = {}
         self._activity_counts = {key: 0 for key in ('started', 'completed', 'empty', 'errors', 'blocked', 'skipped')}
@@ -355,7 +395,7 @@ class Enricher(threading.Thread):
                 and (confidence is None or confidence >= needed))
         if sure:
             kind, book = 'alert', self.alerted
-        elif snr >= POSSIBLE_MIN_SNR_DB and (confidence is None or confidence >= POSSIBLE_MIN_CONFIDENCE):
+        elif audible(record, POSSIBLE_MIN_SNR_DB) and (confidence is None or confidence >= POSSIBLE_MIN_CONFIDENCE):
             kind, book = 'possible', self.possibles
         else:
             return
@@ -462,14 +502,20 @@ class Enricher(threading.Thread):
         # Worth a Meta label: at least a little above the room, and clearly located or clearly loud.
         # Live, Nov 4: blips at -2 dB came back as "knock on the door" and only cost credits.
         snr = (record.get('loudness') or {}).get('snr_db') or 0
-        strong = snr >= META_MIN_SNR_DB and (
-            (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or snr >= 6)
+        located = (record.get('where') or {}).get('quality') in ('candidate', 'ambiguous') or snr >= 6
+        strong = snr >= META_MIN_SNR_DB and located
+        # A steady high tone (a ring) is audible at a lower SNR: an audio-only label from 1 dB. The camera
+        # check (source) keeps the 3 dB gate.
+        tonal = tonal_beep(acoustic)
+        strong_audio = audible(record, META_MIN_SNR_DB) and located
         trusted_local = ((record.get('sound') or {}).get('local_similarity') or 0) >= 0.92
         # Send measurements rather than a heuristic category such as "speech-like",
         # which otherwise primes the model to repeat the routing mistake.
         facts = {k: acoustic.get(k) for k in ('duration_s', 'dominant_hz', 'second_hz', 'centroid_hz',
                                             'flatness', 'tone_share', 'voice_band', 'onsets',
                                             'attack_ms', 'crest_db')}
+        if tonal:
+            facts['same_tone_in_last_15_s'] = self._repeats(record, acoustic)  # a phone rings in a pattern
         sheet = (self.references.sheet(wav) if wav and self.references is not None and self.references.items
                  else None)
         crop = task.get('crop_jpeg')
@@ -497,8 +543,7 @@ class Enricher(threading.Thread):
                 person = PEOPLE.search(f"{reply['object']} {reply['sound']}")
                 if reply['consistent'] == 'yes' and task.get('frame_jpeg') is not None and not person:
                     task['outline'] = True  # sound and sight agree: outline that object (SAM 3.1), never a person
-        if (audio_allowed and not explicit and wav and strong and not speech_likely and not checked and (not trusted_local or watch)
-                and self._meta_ok('identify')):
+        def identify():
             reply = self._call(rid, self.meta.classify_sound, wav, facts, sheet, watch)
             if reply:
                 self._update(rid, {'sound': {'label': reply['label'], 'category': reply['category'],
@@ -508,15 +553,26 @@ class Enricher(threading.Thread):
                 self._alerts(rid, record, reply.get('watch') or [], 'Muse Spark', reply['confidence'],
                              reply['label'], nearest=nearest)
 
+        can_identify = (audio_allowed and not explicit and wav and strong_audio and not checked
+                        and (not trusted_local or watch))
+        if can_identify and not speech_likely and self._meta_ok('identify'):
+            identify()
+
         # Listening for a name: also transcribe longer sounds that did not look like speech (a snap or
         # a door at the start can hide a sentence; live, Nov 4). A caption costs about $0.0003.
-        long_enough = self.listen_for_names and record.get('duration_s', 0) >= 1.0
+        # Live, Nov 5: transcribing every 1 s sound at 0-3 dB over the room turned hum and a ringing phone
+        # into "Yeah" captions, so automatic captions need 3 dB, and a steady tone is never sent for names.
+        long_enough = self.listen_for_names and record.get('duration_s', 0) >= 1.0 and not tonal
+        loud_enough = explicit or snr >= META_MIN_SNR_DB
         captioned = False
-        if (speechy or long_enough or (explicit and speech_likely and wav)) and self._meta_ok(
+        if (((speechy or long_enough) and loud_enough) or (explicit and speech_likely and wav)) and self._meta_ok(
                 'captions', on_block=manual_notice if explicit else None):
             speech_wav = task.get('speech_wav') or wav
             reply = self._call(rid, self.meta.transcribe_turns, speech_wav) if speech_wav else None
             turns = (reply.get('turns') or []) if reply else []
+            said = ' '.join(t['text'] for t in turns if isinstance(t, dict) and isinstance(t.get('text'), str))
+            if not explicit and turns and filler_transcript(said):
+                turns = []  # "Yeah." or "[Music]" alone: what ASR writes for a sound nobody said
             if explicit:
                 # An empty ASR response is not evidence that a speech-like ring
                 # was speech. Keep the fallback bounded to one audio label call.
@@ -537,6 +593,11 @@ class Enricher(threading.Thread):
                          'sound': {'label': 'speech', 'category': 'speech', 'confidence': 0.9,
                                    'source': 'muse-voice-transcribe'}}
                 self._update(rid, patch, 'captions', out)
+        if can_identify and speech_likely and tonal and not captioned and self._meta_ok('identify'):
+            # A steady high tone that scored as speech and said nothing (or only "Yeah"): the room hum can
+            # make a quiet ring look like speech, so name it with one audio-only call. An ordinary voice
+            # with an empty transcript still gets no extra paid call.
+            identify()
 
         if explicit:
             if checked:
@@ -593,6 +654,21 @@ class Enricher(threading.Thread):
     def _speaker(self, azimuth):
         with self.lock:
             return self.speakers.name_for(azimuth)
+
+    def _repeats(self, record, acoustic):
+        """How many other sounds within 15 s had this same high tone (within 3%)."""
+        high = [float(f) for f in (acoustic.get('dominant_hz'), acoustic.get('second_hz'))
+                if f is not None and float(f) >= TONAL_MIN_HZ]
+        try:
+            when = float(record.get('epoch') or time.time())
+        except (TypeError, ValueError):
+            when = time.time()
+        with self.lock:
+            self.tones = [(t, p) for t, p in self.tones if abs(when - t) <= 60]
+            count = sum(1 for t, p in self.tones if abs(when - t) <= 15
+                        and any(abs(a - b) <= 0.03 * b for a in high for b in p))
+            self.tones.append((when, high))
+        return count
 
     def _cell(self, record):
         """Where a context answer can be reused: a 25 cm cell, else a pixel or direction bin."""

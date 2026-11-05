@@ -23,8 +23,14 @@ def ring(seconds=1.0, f=(1400, 1800)):
     return sum(np.sin(2 * np.pi * fi * t) for fi in f) * 0.3
 
 
-def record(snr=12.0):
-    rec = sm.make_record({'snr_db': snr, 'seconds': 1.0, 'z': 30}, [0.3, 0, 1.0], profile=sm.acoustic_profile(ring()),
+def noise(seconds=1.2):
+    return np.random.default_rng(1).normal(0, 0.2, int(16000 * seconds))
+
+
+def record(snr=12.0, x=None):
+    x = ring() if x is None else x
+    rec = sm.make_record({'snr_db': snr, 'seconds': len(x) / 16000, 'z': 30}, [0.3, 0, 1.0],
+                         profile=sm.acoustic_profile(x),
                          view={'spot': (100, 80), 'point': np.array([0.3, 0.0, 1.0]), 'measured': True,
                                'quality': {'state': 'candidate'}})
     return rec
@@ -48,9 +54,15 @@ class Tiers(unittest.TestCase):
         self.assertEqual(self.kinds(), [('alert', 'knock on the door'), ('possible', 'smoke alarm')])
 
     def test_faint_or_very_unsure_sounds_are_not_offered_at_all(self):
-        self.enricher._alerts('a', record(2.0), ['knock on the door'], 'Muse Spark', 0.9)
-        self.enricher._alerts('b', record(12.0), ['knock on the door'], 'Muse Spark', 0.2)
+        self.enricher._alerts('a', record(2.0, noise()), ['knock on the door'], 'Muse Spark', 0.9)
+        self.enricher._alerts('b', record(0.5), ['smoke alarm'], 'Muse Spark', 0.9)
+        self.enricher._alerts('c', record(12.0), ['knock on the door'], 'Muse Spark', 0.2)
         self.assertEqual(self.results, [])
+
+    def test_a_quiet_steady_ring_is_offered_as_possible(self):
+        # Nov 5: a real ring at 1148 Hz measured +1.5 to +3 dB over the room (broadband)
+        self.enricher._alerts('a', record(2.0), ['phone ringing'], 'Muse Spark', 0.6)
+        self.assertEqual(self.kinds(), [('possible', 'phone ringing')])
 
     def test_a_sound_you_said_no_to_never_flags_that_watch_again(self):
         self.enricher._alerts('a', record(12.0), ['knock on the door'], 'Muse Spark', 0.95,
@@ -155,6 +167,71 @@ class Claps(unittest.TestCase):
         enricher.meta.classify_sound.assert_not_called()
         enricher.meta.source_check.assert_not_called()
         self.assertEqual(results, [])
+
+
+class QuietRingsAndYeah(unittest.TestCase):
+    """Live, Nov 5: a quiet ring was never named, and hum or a ring became "Yeah" captions."""
+
+    def setUp(self):
+        self.results = []
+        self.meta = mock.Mock()
+        self.meta.classify_sound.return_value = {'label': 'phone ringing', 'category': 'ring or alarm',
+                                                 'description': 'a phone ringing', 'confidence': 0.6,
+                                                 'watch': ['phone ringing']}
+        self.meta.transcribe_turns.return_value = {'text': 'Yeah.', 'turns': [
+            {'text': 'Yeah.', 'start_s': 0.0, 'end_s': 0.6, 'speaker': 'A'}]}
+        self.enricher = Enricher(sm.Memory(tempfile.mkdtemp()), self.meta, {'identify', 'captions'},
+                                 on_result=lambda *r: self.results.append(r), identify_limit=(0.0, 100))
+        self.enricher.watch = ['phone ringing']
+        self.enricher.listen_for_names = True     # --name Keith
+
+    def run_task(self, rec, x):
+        rec['loudness'].setdefault('peak_dbfs', -65.0)   # raw XVF3800 level, as on the real board
+        self.enricher.process({'record': rec, 'wav': wav_bytes(x), 'speech_wav': wav_bytes(x),
+                               'requested_at': time.time()})
+
+    def test_filler_transcripts(self):
+        for text in ('Yeah.', 'yeah', 'Yeah, yeah.', '[Music]', '(upbeat music)', '♪', 'Thank you.', ''):
+            self.assertTrue(sm_filler(text), text)
+        for text in ("Keith, dinner's ready", 'Can you hear me?', 'Testing one two three', 'Hello'):
+            self.assertFalse(sm_filler(text), text)
+
+    def test_a_quiet_ring_is_named_not_transcribed(self):
+        self.run_task(record(2.0), ring())
+        self.meta.transcribe_turns.assert_not_called()
+        self.meta.classify_sound.assert_called_once()
+        facts = self.meta.classify_sound.call_args.args[1]
+        self.assertEqual(facts['same_tone_in_last_15_s'], 0)
+        self.assertIn(('possible', 'phone ringing'), [(r[1], r[2].get('watch')) for r in self.results
+                                                       if isinstance(r[2], dict)])
+        self.run_task(record(2.0), ring())          # the next ring of the same phone
+        self.assertEqual(self.meta.classify_sound.call_args.args[1]['same_tone_in_last_15_s'], 1)
+
+    def test_the_name_listener_skips_sounds_under_3_db(self):
+        self.run_task(record(2.0, noise()), noise())
+        self.meta.transcribe_turns.assert_not_called()
+
+    def test_a_lone_yeah_is_dropped_and_the_sound_is_named_instead(self):
+        rec = record(12.0)
+        rec['acoustic'].update(speech_score=0.6, tone_share=0.3, flatness=0.04)   # hum-tinged ring
+        self.run_task(rec, ring())
+        self.meta.transcribe_turns.assert_called_once()
+        self.assertNotIn('captions', [r[1] for r in self.results])
+        self.meta.classify_sound.assert_called_once()
+
+    def test_real_speech_is_still_captioned(self):
+        self.meta.transcribe_turns.return_value = {'text': "Keith, dinner's ready", 'turns': [
+            {'text': "Keith, dinner's ready", 'start_s': 0.0, 'end_s': 1.2, 'speaker': 'A'}]}
+        rec = record(8.0, noise())
+        rec['acoustic'].update(speech_score=0.6)
+        self.run_task(rec, noise())
+        self.assertIn('captions', [r[1] for r in self.results])
+        self.meta.classify_sound.assert_not_called()
+
+
+def sm_filler(text):
+    from insight import filler_transcript
+    return filler_transcript(text)
 
 
 class Screen(unittest.TestCase):
